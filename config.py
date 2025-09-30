@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple
 import numpy as np
 
@@ -19,19 +19,21 @@ class ArucoConfig:
 
 @dataclass
 class UndistortConfig:
-    enable_frame_undistort: bool = True  # remap each frame
+    enable_frame_undistort: bool = True # remap each frame
     enable_corner_undistort: bool = True # undistort corners before subpix
-    camera_matrix: List[List[float]] = (
-        [9.41642211e+03, 0.0,              9.64483756e+02],
-        [0.0,              9.40228615e+03, 6.08511402e+02],
-        [0.0,              0.0,             1.0]
-    )
-    dist_coeffs: List[float] = [4.64572643e+00, -2.68199626e+02, -1.41158321e-02, -2.14888005e-02, -2.27739842e+00]
-
+    camera_matrix: List[List[float]] = field(default_factory=lambda: [
+    [9.41642211e+03, 0.0, 9.64483756e+02],
+    [0.0, 9.40228615e+03, 6.08511402e+02],
+    [0.0, 0.0, 1.0]
+    ])
+    dist_coeffs: List[float] = field(default_factory=lambda: [
+    4.64572643e+00, -2.68199626e+02, -1.41158321e-02, -2.14888005e-02, -2.27739842e+00
+    ])
     def as_np(self) -> Tuple[np.ndarray, np.ndarray]:
         K = np.array(self.camera_matrix, dtype=np.float64)
         D = np.array(self.dist_coeffs, dtype=np.float64)
         return K, D
+
 
 @dataclass
 class JPEGConfig:
