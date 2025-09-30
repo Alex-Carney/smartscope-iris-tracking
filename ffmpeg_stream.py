@@ -1,3 +1,4 @@
+# ffmpeg_stream.py
 import asyncio
 from typing import List, Optional
 
@@ -36,7 +37,6 @@ class FFMPEGMJPEGStream:
     async def read_jpeg(self) -> Optional[bytes]:
         if not self.proc or not self.proc.stdout:
             return None
-        # Accumulate until we can slice a full JPEG
         while True:
             chunk = await self.proc.stdout.read(4096)
             if not chunk:
@@ -50,13 +50,26 @@ class FFMPEGMJPEGStream:
             if e < 0:
                 self.buf = self.buf[s:]
                 continue
-            jpg = self.buf[s : e + 2]
-            self.buf = self.buf[e + 2 :]
+            jpg = self.buf[s:e+2]
+            self.buf = self.buf[e+2:]
             return jpg
 
     async def stop(self) -> None:
+        """Gracefully stop ffmpeg and fully drain pipes to avoid Proactor warnings on Windows."""
         try:
             if self.proc and self.proc.returncode is None:
+                # Ask ffmpeg to exit
                 self.proc.terminate()
-        except Exception:
-            pass
+                try:
+                    # Drain stdout/stderr to EOF so transports close cleanly
+                    await asyncio.wait_for(self.proc.communicate(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    # Be forceful if it hangs
+                    self.proc.kill()
+                    try:
+                        await self.proc.communicate()
+                    except Exception:
+                        pass
+        finally:
+            self.proc = None
+            self.buf = b""
