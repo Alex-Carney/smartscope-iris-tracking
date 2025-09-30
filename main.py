@@ -78,7 +78,7 @@ async def run(app: AppConfig):
 
             # Keep sample, print, publish
             bench.add_position(x_mm, y_mm)
-            print(f"{x_mm:.5f},{y_mm:.5f}")
+            print(f"{x_mm:.10f}   |   {y_mm:.10f}")
             await pub.publish_xy(x_mm, y_mm, angle_deg=0.0)
 
             # Feed noise benchmark
