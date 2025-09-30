@@ -1,7 +1,6 @@
 import asyncio
 import cv2
 import numpy as np
-
 from ffmpeg_stream import FFMPEGMJPEGStream
 from jpeg_decoder import JPEGDecoder
 from undistort import Undistorter
@@ -9,27 +8,30 @@ from aruco_tracker import ArucoTracker
 from noise_gate import NoiseGate
 from basic_benchmark import BasicBenchmark
 from nats_publisher import NatsPublisher
-
+from fft_benchmark import NoiseBenchmark
 from config import AppConfig
 
 
 async def run(app: AppConfig):
-    camera_cfg = app.camera
-    undistort_cfg = app.undistort
-    aruco_cfg = app.aruco
-    jpg_cfg = app.jpeg
-    noise_cfg = app.noise
+    cam = app.camera
+    und = app.undistort
+    arc = app.aruco
+    jpg = app.jpeg
+    ngc = app.noise
     run_cfg = app.run
 
-    stream = FFMPEGMJPEGStream(camera_cfg.device_name, camera_cfg.width, camera_cfg.height, camera_cfg.fps)
-    decoder = JPEGDecoder(jpg_cfg.libjpeg_turbo_path)
-    tracker = ArucoTracker(aruco_cfg.dictionary, aruco_cfg.aruco_id, aruco_cfg.aruco_w_mm, aruco_cfg.aruco_h_mm)
+    stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
+    decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
+    tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
 
-    K, D = undistort_cfg.as_np()
-    undistorter = Undistorter(K, D, (camera_cfg.width, camera_cfg.height))
+    K, D = und.as_np()
+    undistorter = Undistorter(K, D, (cam.width, cam.height))
 
-    noise_gate = NoiseGate(noise_cfg.enable, noise_cfg.use_radial, noise_cfg.floor_mm, noise_cfg.floor_x_mm, noise_cfg.floor_y_mm)
+    noise_gate = NoiseGate(ngc.enable, ngc.use_radial, ngc.floor_mm, ngc.floor_x_mm, ngc.floor_y_mm)
     bench = BasicBenchmark()
+
+    # NEW noise benchmark instance (use camera FPS as the Allan/FFT sampling rate)
+    noise_bench = NoiseBenchmark(out_path="noise_benchmark.png", fps_hint=cam.fps)
 
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
@@ -46,7 +48,7 @@ async def run(app: AppConfig):
             bench.mark_processed()
             frame = decoder.decode_bgr(jpg_bytes)
 
-            if undistort_cfg.enable_frame_undistort:
+            if und.enable_frame_undistort:
                 frame = undistorter.remap(frame)
 
             if not first_frame_saved and run_cfg.save_first_frame:
@@ -56,7 +58,7 @@ async def run(app: AppConfig):
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            und_points_fn = undistorter.undistort_points if undistort_cfg.enable_corner_undistort else None
+            und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
             mm = tracker.detect_mm(gray, und_points_fn)
             if mm is None:
                 continue
@@ -68,16 +70,21 @@ async def run(app: AppConfig):
                 bench.mark_skipped()
                 continue
 
-            # Keep sample, print, and publish
+            # Keep sample, print, publish
             bench.add_position(x_mm, y_mm)
             print(f"{x_mm:.5f},{y_mm:.5f}")
             await pub.publish_xy(x_mm, y_mm, angle_deg=0.0)
+
+            # Feed noise benchmark
+            noise_bench.add(x_mm, y_mm)
 
     except KeyboardInterrupt:
         pass
     finally:
         await pub.close()
-        await stream.stop()
+        await stream.stop()  # drain subprocess first to avoid Proactor warnings
+        # Save the noise benchmark figure
+        noise_bench.finish()
         bench.print_summary("(kept samples)")
 
 if __name__ == "__main__":

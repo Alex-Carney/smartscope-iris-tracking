@@ -2,3 +2,5 @@ opencv-contrib-python
 numpy
 turbojpeg
 nats-py
+matplotlib
+allantools
