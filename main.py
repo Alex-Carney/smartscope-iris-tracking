@@ -1,4 +1,6 @@
 import asyncio
+import time
+
 import cv2
 import numpy as np
 from ffmpeg_stream import FFMPEGMJPEGStream
@@ -9,6 +11,7 @@ from noise_gate import NoiseGate
 from basic_benchmark import BasicBenchmark
 from nats_publisher import NatsPublisher
 from fft_benchmark import NoiseBenchmark
+from fps_glitch_benchmark import FPSGlitchBenchmark
 from config import AppConfig
 
 
@@ -23,6 +26,7 @@ async def run(app: AppConfig):
     stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
     decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
     tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
+    glitch = FPSGlitchBenchmark(out_path="fps_glitch_benchmark.png")
 
     K, D = und.as_np()
     undistorter = Undistorter(K, D, (cam.width, cam.height))
@@ -64,6 +68,8 @@ async def run(app: AppConfig):
                 continue
             bench.mark_with_marker()
             x_mm, y_mm = mm
+            now = time.perf_counter()
+            glitch.add(now, x_mm, y_mm)
             bench.tick_fps()
 
             if not noise_gate.should_send(x_mm, y_mm):
@@ -84,6 +90,7 @@ async def run(app: AppConfig):
         await pub.close()
         await stream.stop()  # drain subprocess first to avoid Proactor warnings
         # Save the noise benchmark figure
+        glitch.finish()
         noise_bench.finish()
         bench.print_summary("(kept samples)")
 
