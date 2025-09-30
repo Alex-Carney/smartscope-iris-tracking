@@ -1,32 +1,35 @@
 import asyncio
 import cv2
 import numpy as np
-from smartscope_aruco.config import AppConfig
-from smartscope_aruco.ffmpeg_stream import FFMPEGMJPEGStream
-from smartscope_aruco.jpeg_decoder import JPEGDecoder
-from smartscope_aruco.undistort import Undistorter
-from smartscope_aruco.aruco_tracker import ArucoTracker
-from smartscope_aruco.noise_gate import NoiseGate
-from smartscope_aruco.benchmark import Benchmark
-from smartscope_aruco.nats_publisher import NatsPublisher
+
+from ffmpeg_stream import FFMPEGMJPEGStream
+from jpeg_decoder import JPEGDecoder
+from undistort import Undistorter
+from aruco_tracker import ArucoTracker
+from noise_gate import NoiseGate
+from basic_benchmark import BasicBenchmark
+from nats_publisher import NatsPublisher
+
+from config import AppConfig
+
 
 async def run(app: AppConfig):
-    cam = app.camera
-    und = app.undistort
-    arc = app.aruco
-    jpg = app.jpeg
-    ngc = app.noise
+    camera_cfg = app.camera
+    undistort_cfg = app.undistort
+    aruco_cfg = app.aruco
+    jpg_cfg = app.jpeg
+    noise_cfg = app.noise
     run_cfg = app.run
 
-    stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
-    decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
-    tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
+    stream = FFMPEGMJPEGStream(camera_cfg.device_name, camera_cfg.width, camera_cfg.height, camera_cfg.fps)
+    decoder = JPEGDecoder(jpg_cfg.libjpeg_turbo_path)
+    tracker = ArucoTracker(aruco_cfg.dictionary, aruco_cfg.aruco_id, aruco_cfg.aruco_w_mm, aruco_cfg.aruco_h_mm)
 
-    K, D = und.as_np()
-    undistorter = Undistorter(K, D, (cam.width, cam.height))
+    K, D = undistort_cfg.as_np()
+    undistorter = Undistorter(K, D, (camera_cfg.width, camera_cfg.height))
 
-    noise_gate = NoiseGate(ngc.enable, ngc.use_radial, ngc.floor_mm, ngc.floor_x_mm, ngc.floor_y_mm)
-    bench = Benchmark()
+    noise_gate = NoiseGate(noise_cfg.enable, noise_cfg.use_radial, noise_cfg.floor_mm, noise_cfg.floor_x_mm, noise_cfg.floor_y_mm)
+    bench = BasicBenchmark()
 
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
@@ -43,7 +46,7 @@ async def run(app: AppConfig):
             bench.mark_processed()
             frame = decoder.decode_bgr(jpg_bytes)
 
-            if und.enable_frame_undistort:
+            if undistort_cfg.enable_frame_undistort:
                 frame = undistorter.remap(frame)
 
             if not first_frame_saved and run_cfg.save_first_frame:
@@ -53,7 +56,7 @@ async def run(app: AppConfig):
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
+            und_points_fn = undistorter.undistort_points if undistort_cfg.enable_corner_undistort else None
             mm = tracker.detect_mm(gray, und_points_fn)
             if mm is None:
                 continue
