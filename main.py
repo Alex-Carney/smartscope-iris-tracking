@@ -12,6 +12,7 @@ from basic_benchmark import BasicBenchmark
 from nats_publisher import NatsPublisher
 from fft_benchmark import NoiseBenchmark
 from fps_glitch_benchmark import FPSGlitchBenchmark
+from frame_repeat_probe import FrameRepeatProbe
 from config import AppConfig
 
 
@@ -27,6 +28,7 @@ async def run(app: AppConfig):
     decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
     tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
     glitch = FPSGlitchBenchmark(out_path="fps_glitch_benchmark.png")
+    repeat_probe = FrameRepeatProbe(out_path="frame_repeat_probe.png")
 
     K, D = und.as_np()
     undistorter = Undistorter(K, D, (cam.width, cam.height))
@@ -51,6 +53,8 @@ async def run(app: AppConfig):
                 break
             bench.mark_processed()
             frame = decoder.decode_bgr(jpg_bytes)
+            now = time.perf_counter()
+            repeat_probe.add_jpeg(now, jpg_bytes)
 
             if und.enable_frame_undistort:
                 frame = undistorter.remap(frame)
@@ -61,6 +65,7 @@ async def run(app: AppConfig):
                 first_frame_saved = True
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            repeat_probe.add_gray(gray)
 
             und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
             mm = tracker.detect_mm(gray, und_points_fn)
@@ -91,6 +96,7 @@ async def run(app: AppConfig):
         await stream.stop()  # drain subprocess first to avoid Proactor warnings
         # Save the noise benchmark figure
         glitch.finish()
+        repeat_probe.finish()
         noise_bench.finish()
         bench.print_summary("(kept samples)")
 
