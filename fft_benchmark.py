@@ -3,12 +3,7 @@
 from typing import List, Optional, Tuple, Dict
 import numpy as np
 import matplotlib.pyplot as plt
-
-try:
-    import allantools as at
-except Exception:
-    at = None
-
+import allantools as at
 from scipy.signal import welch, get_window
 
 
@@ -31,6 +26,8 @@ class NoiseBenchmark:
         use_median_dc: bool = True,
         title: str = "Noise Benchmark",
         allan_fit_portion: float = 0.4,   # fit first 40% of Allan points
+        allan_variant: str = "mdev",
+        allan_data_type: str = "freq",
         min_fit_points: int = 8,
         welch_nperseg: Optional[int] = None,
         welch_overlap: float = 0.5
@@ -43,6 +40,8 @@ class NoiseBenchmark:
         self.min_fit_points = int(min_fit_points)
         self.welch_nperseg = welch_nperseg
         self.welch_overlap = float(np.clip(welch_overlap, 0.0, 0.95))
+        self.allan_variant = allan_variant.lower()  # "oadev" or "mdev"
+        self.allan_data_type = allan_data_type.lower()  # "phase" or "freq"
 
         self._xs: List[float] = []
         self._ys: List[float] = []
@@ -96,17 +95,33 @@ class NoiseBenchmark:
 
     def _compute_allan(self, dev: np.ndarray, fs: float):
         """
-        Overlapping Allan deviation (OADEV) using allantools.
-        Treat displacement as 'phase' data -> sigma in mm.
+        Allan-family deviation using allantools.
+        - self.allan_variant: "oadev" (classic overlapping) or "mdev" (modified Allan)
+        - self.allan_data_type: "phase" or "freq"
+        Returns (taus_s, sigma).
         """
         if at is None or dev.size < 16 or fs <= 0:
             return None, None
+
         tau0 = 1.0 / fs
         hi_samp = max(2, dev.size // 2)
         taus = np.logspace(np.log10(tau0), np.log10(hi_samp * tau0), num=30)
+
         try:
-            taus_out, oadev, oadev_err, ns = at.oadev(dev, rate=fs, data_type="phase", taus=taus)
-            return np.asarray(taus_out, dtype=float), np.asarray(oadev, dtype=float)
+            if self.allan_data_type == "freq":
+                data = np.diff(dev) * fs  # convert displacement to “frequency-like” samples
+                rate = fs  # 1 / tau0 of the derived series
+                if self.allan_variant == "mdev":
+                    taus_out, sig, err, ns = at.mdev(data, rate=rate, data_type="freq", taus=taus)
+                else:
+                    taus_out, sig, err, ns = at.oadev(data, rate=rate, data_type="freq", taus=taus)
+            else:
+                # phase/position data directly
+                if self.allan_variant == "mdev":
+                    taus_out, sig, err, ns = at.mdev(dev, rate=fs, data_type="phase", taus=taus)
+                else:
+                    taus_out, sig, err, ns = at.oadev(dev, rate=fs, data_type="phase", taus=taus)
+            return np.asarray(taus_out, float), np.asarray(sig, float)
         except Exception:
             return None, None
 
@@ -261,7 +276,8 @@ class NoiseBenchmark:
         if plotted:
             ax.set_xlabel("τ [s]")
             ax.set_ylabel("Allan deviation [mm]")
-            ax.set_title("OADEV with log–log slope fit and τ^{-1/2} overlay")
+            kind = "MDEV" if self.allan_variant == "mdev" else "OADEV"
+            ax.set_title(f"{kind} with log–log slope fit and τ^{{-1/2}} overlay")
             ax.grid(True, which="both", alpha=0.3)
             ax.legend(loc="upper right", fontsize=9)
         else:
