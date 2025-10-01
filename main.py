@@ -8,6 +8,9 @@ from ffmpeg_stream import FFMPEGMJPEGStream
 from filter_benchmark_compare import FilterBenchmarkCompare
 from filters.boxcar import Boxcar
 from filters.ema import EMA
+from filters.sgq import CausalSavGol
+from filters.butterworth import BiquadLowpass
+from filters.ema_cascade import CascadedEMA
 from jpeg_decoder import JPEGDecoder
 from undistort import Undistorter
 from aruco_tracker import ArucoTracker
@@ -31,8 +34,8 @@ async def run(app: AppConfig):
     # --------------------------------------------
     # FILTERS: define two to compare
     # --------------------------------------------
-    filter_A = Boxcar(N=9)
-    filter_B = EMA(alpha=0.2)
+    filter_A = EMA(alpha=0.25)
+    filter_B = CascadedEMA(alpha=0.2, stages=3)
 
     # --------------------------------------------
     # SIMPLE SWITCH: what do we send to NATS?
@@ -41,7 +44,7 @@ async def run(app: AppConfig):
     #   "filter_b"  -> publish filter_B output
     # If using a filter, we can optionally publish RAW until filter warm-up
     # --------------------------------------------
-    PUBLISH_MODE = "raw"           # "raw" | "filter_a" | "filter_b"
+    PUBLISH_MODE = "filter_a"          # "raw" | "filter_a" | "filter_b"
     FALLBACK_RAW_UNTIL_READY = True
 
     # Dedicated per-axis instances for the publish path (do not reuse comparator's)
@@ -120,7 +123,7 @@ async def run(app: AppConfig):
 
             # Keep RAW sample for stats/plots (unchanged)
             bench.add_position(x_mm, y_mm)
-            print(f"{x_mm:.10f}   |   {y_mm:.10f}")
+            # print(f"{x_mm:.10f}   |   {y_mm:.10f}")
 
             # -------------------------------
             # SELECT WHAT TO PUBLISH

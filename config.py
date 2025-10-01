@@ -7,7 +7,7 @@ class CameraConfig:
     device_name: str = "Global Shutter Camera"
     width: int = 1920
     height: int = 1200
-    fps: int = 90
+    fps: int = 30
     # ffmpeg uses dshow on Windows; adjust if you change platforms
 
 @dataclass
@@ -61,10 +61,11 @@ class RunConfig:
 
 @dataclass
 class AppConfig:
-    camera: CameraConfig = CameraConfig()
-    aruco: ArucoConfig = ArucoConfig()
-    undistort: UndistortConfig = UndistortConfig()
-    jpeg: JPEGConfig = JPEGConfig()
-    nats: NATSConfig = NATSConfig()
-    noise: NoiseGateConfig = NoiseGateConfig()
-    run: RunConfig = RunConfig()
+    # IMPORTANT: use default_factory for nested dataclasses (they’re mutable)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    aruco: ArucoConfig = field(default_factory=ArucoConfig)
+    undistort: UndistortConfig = field(default_factory=UndistortConfig)
+    jpeg: JPEGConfig = field(default_factory=JPEGConfig)
+    nats: NATSConfig = field(default_factory=NATSConfig)
+    noise: NoiseGateConfig = field(default_factory=NoiseGateConfig)
+    run: RunConfig = field(default_factory=RunConfig)

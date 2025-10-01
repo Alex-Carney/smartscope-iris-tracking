@@ -20,7 +20,7 @@ class ArucoTracker:
             c = c_in
             xmin = float(np.min(c[0, :, 0])); xmax = float(np.max(c[0, :, 0]))
             ymin = float(np.min(c[0, :, 1])); ymax = float(np.max(c[0, :, 1]))
-            DESIRED_WIN = 11
+            DESIRED_WIN = 19
             pad = max(12, 2 * DESIRED_WIN + 6)
             x0 = int(max(0, np.floor(xmin) - pad))
             y0 = int(max(0, np.floor(ymin) - pad))
@@ -38,10 +38,10 @@ class ArucoTracker:
             legal_win = int(max(1, min(DESIRED_WIN, max_win_x, max_win_y)))
             if legal_win < 1:
                 return c_in
-            roi_blur = cv2.GaussianBlur(roi, (3, 3), 0.6)
+            roi_blur = cv2.GaussianBlur(roi, (9, 9), 0.6)
             refined = cv2.cornerSubPix(
                 roi_blur, c_loc, (legal_win, legal_win), (-1, -1),
-                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5000, 1e-6)
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5000, 1e-8)
             )
             refined[:, :, 0] += x0
             refined[:, :, 1] += y0

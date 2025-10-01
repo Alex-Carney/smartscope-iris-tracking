@@ -148,7 +148,7 @@ class NoiseBenchmark:
         """
         if taus.size == 0 or sigmas.size == 0:
             return None
-        w = taus ** (-0.5)
+        w = taus ** (-1.5)
         den = float(np.sum(w * w))
         if den == 0.0:
             return None
