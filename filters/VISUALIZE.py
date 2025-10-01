@@ -21,8 +21,8 @@ def build_filter(config):
 def main():
     # Hardcoded parameters - modify these values directly in the script
     config = {
-        "kind": "sg",           # boxcar | ema | sg (causal)
-        "N": 3,                     # boxcar length
+        "kind": "ema",           # boxcar | ema | sg (causal)
+        "N": 9,                     # boxcar length
         "alpha": 0.2,              # EMA alpha
         "window": 26,                # SG window length
         "polyorder": 1,             # SG poly order
