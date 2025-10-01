@@ -107,7 +107,6 @@ async def run(app: AppConfig):
                 first_frame_saved = True
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            timer.mark("gray")
             repeat_probe.add_gray(gray)
 
             und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
@@ -149,7 +148,6 @@ async def run(app: AppConfig):
                         continue
 
             await pub.publish_xy(out_x, out_y, angle_deg=0.0)
-            timer.mark("nats publish")
 
             # Feed noise benchmark with RAW (consistent with your console stats)
             noise_bench.add(x_mm, y_mm)
