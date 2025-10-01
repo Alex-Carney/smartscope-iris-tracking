@@ -17,6 +17,7 @@ from nats_publisher import NatsPublisher
 from fft_benchmark import NoiseBenchmark
 from fps_glitch_benchmark import FPSGlitchBenchmark
 from frame_repeat_probe import FrameRepeatProbe
+from time_accounting import TimeAccounting
 from config import AppConfig
 
 
@@ -62,6 +63,7 @@ async def run(app: AppConfig):
 
     stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
     decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
+    timer = TimeAccounting()
     tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
     glitch = FPSGlitchBenchmark(out_path="fps_glitch_benchmark.png")
     repeat_probe = FrameRepeatProbe(out_path="frame_repeat_probe.png")
@@ -77,9 +79,7 @@ async def run(app: AppConfig):
 
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
-
     await stream.start()
-
     first_frame_saved = False
 
     try:
@@ -87,13 +87,16 @@ async def run(app: AppConfig):
             jpg_bytes = await stream.read_jpeg()
             if jpg_bytes is None:
                 break
+            timer.start_frame()
             bench.mark_processed()
             frame = decoder.decode_bgr(jpg_bytes)
+            timer.mark("jpeg_decode")
             now = time.perf_counter()
             repeat_probe.add_jpeg(now, jpg_bytes)
 
             if und.enable_frame_undistort:
                 frame = undistorter.remap(frame)
+            timer.mark("undistort frame")
 
             if not first_frame_saved and run_cfg.save_first_frame:
                 cv2.imwrite(run_cfg.save_first_frame_path, frame)
@@ -101,10 +104,12 @@ async def run(app: AppConfig):
                 first_frame_saved = True
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            timer.mark("gray")
             repeat_probe.add_gray(gray)
 
             und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
             mm = tracker.detect_mm(gray, und_points_fn)
+            timer.mark("aruco detect")
             if mm is None:
                 continue
             bench.mark_with_marker()
@@ -141,9 +146,11 @@ async def run(app: AppConfig):
                         continue
 
             await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+            timer.mark("nats publish")
 
             # Feed noise benchmark with RAW (consistent with your console stats)
             noise_bench.add(x_mm, y_mm)
+            timer.end_frame()
 
     except KeyboardInterrupt:
         pass
@@ -151,6 +158,7 @@ async def run(app: AppConfig):
         await pub.close()
         await stream.stop()  # drain subprocess first to avoid Proactor warnings
         glitch.finish()
+        timer.finish()
         filters.finish()
         repeat_probe.finish()
         noise_bench.finish()
