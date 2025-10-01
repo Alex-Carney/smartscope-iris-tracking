@@ -4,6 +4,9 @@ import time
 import cv2
 import numpy as np
 from ffmpeg_stream import FFMPEGMJPEGStream
+from filter_benchmark_compare import FilterBenchmarkCompare
+from filters.boxcar import Boxcar
+from filters.ema import EMA
 from jpeg_decoder import JPEGDecoder
 from undistort import Undistorter
 from aruco_tracker import ArucoTracker
@@ -24,6 +27,11 @@ async def run(app: AppConfig):
     ngc = app.noise
     run_cfg = app.run
 
+    # APPLY FILTERS HERE
+    filter_A = Boxcar(N=9)
+    filter_B = EMA(alpha=0.2)
+
+    filters = FilterBenchmarkCompare(filter_a=filter_A, filter_b=filter_B, fps_hint=cam.fps,out_path="filter_compare_boxcar9_vs_ema025.png", title=f"Filter comparison {str(filter_A)} vs {str(filter_B)}")
     stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
     decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
     tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
@@ -74,6 +82,7 @@ async def run(app: AppConfig):
             bench.mark_with_marker()
             x_mm, y_mm = mm
             now = time.perf_counter()
+            filters.add(x_mm, y_mm)
             glitch.add(now, x_mm, y_mm)
             bench.tick_fps()
 
@@ -96,6 +105,7 @@ async def run(app: AppConfig):
         await stream.stop()  # drain subprocess first to avoid Proactor warnings
         # Save the noise benchmark figure
         glitch.finish()
+        filters.finish()
         repeat_probe.finish()
         noise_bench.finish()
         bench.print_summary("(kept samples)")
