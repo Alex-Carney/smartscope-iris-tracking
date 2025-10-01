@@ -2,7 +2,7 @@
 # smartscope_aruco/filters/ema.py
 from typing import Optional, Tuple
 import numpy as np
-from base import BaseFilter
+from filters.base import BaseFilter
 
 class EMA(BaseFilter):
     """

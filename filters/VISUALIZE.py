@@ -3,9 +3,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-from boxcar import Boxcar
-from ema import EMA
-from sgq import CausalSavGol
+from filters.boxcar import Boxcar
+from filters.ema import EMA
+from filters.sgq import CausalSavGol
 
 def build_filter(config):
     kind = config["kind"].lower()

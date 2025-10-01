@@ -3,7 +3,7 @@
 from collections import deque
 from typing import Optional, Tuple
 import numpy as np
-from base import BaseFilter
+from filters.base import BaseFilter
 
 def _causal_savgol_weights(window: int, polyorder: int) -> np.ndarray:
     """
