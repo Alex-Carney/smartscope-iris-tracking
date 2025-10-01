@@ -21,11 +21,11 @@ def build_filter(config):
 def main():
     # Hardcoded parameters - modify these values directly in the script
     config = {
-        "kind": "ema",           # boxcar | ema | sg (causal)
+        "kind": "sg",           # boxcar | ema | sg (causal)
         "N": 3,                     # boxcar length
         "alpha": 0.2,              # EMA alpha
-        "window": 9,                # SG window length
-        "polyorder": 2,             # SG poly order
+        "window": 26,                # SG window length
+        "polyorder": 1,             # SG poly order
         "fps": 90.0,                # fps to show delay in ms
         "max_lags": 200,            # max lags for IIR plot
         "tol": 1e-4                 # tail tolerance for IIR

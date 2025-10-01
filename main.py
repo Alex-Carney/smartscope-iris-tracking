@@ -1,3 +1,4 @@
+# ASCII only
 import asyncio
 import time
 
@@ -27,11 +28,38 @@ async def run(app: AppConfig):
     ngc = app.noise
     run_cfg = app.run
 
-    # APPLY FILTERS HERE
+    # --------------------------------------------
+    # FILTERS: define two to compare
+    # --------------------------------------------
     filter_A = Boxcar(N=9)
     filter_B = EMA(alpha=0.2)
 
-    filters = FilterBenchmarkCompare(filter_a=filter_A, filter_b=filter_B, fps_hint=cam.fps,out_path="filter_compare_boxcar9_vs_ema025.png", title=f"Filter comparison {str(filter_A)} vs {str(filter_B)}")
+    # --------------------------------------------
+    # SIMPLE SWITCH: what do we send to NATS?
+    #   "raw"       -> publish raw positions
+    #   "filter_a"  -> publish filter_A output
+    #   "filter_b"  -> publish filter_B output
+    # If using a filter, we can optionally publish RAW until filter warm-up
+    # --------------------------------------------
+    PUBLISH_MODE = "raw"           # "raw" | "filter_a" | "filter_b"
+    FALLBACK_RAW_UNTIL_READY = True
+
+    # Dedicated per-axis instances for the publish path (do not reuse comparator's)
+    pub_fx = pub_fy = None
+    if PUBLISH_MODE == "filter_a":
+        pub_fx, pub_fy = filter_A.copy(), filter_A.copy()
+    elif PUBLISH_MODE == "filter_b":
+        pub_fx, pub_fy = filter_B.copy(), filter_B.copy()
+
+    # Comparator (makes its own internal copies)
+    filters = FilterBenchmarkCompare(
+        filter_a=filter_A,
+        filter_b=filter_B,
+        fps_hint=cam.fps,
+        out_path="filter_compare_boxcar9_vs_ema025.png",
+        title=f"Filter comparison {str(filter_A)} vs {str(filter_B)}"
+    )
+
     stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
     decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
     tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
@@ -44,7 +72,7 @@ async def run(app: AppConfig):
     noise_gate = NoiseGate(ngc.enable, ngc.use_radial, ngc.floor_mm, ngc.floor_x_mm, ngc.floor_y_mm)
     bench = BasicBenchmark()
 
-    # NEW noise benchmark instance (use camera FPS as the Allan/FFT sampling rate)
+    # Noise benchmark (uses camera FPS as sampling rate)
     noise_bench = NoiseBenchmark(out_path="noise_benchmark.png", fps_hint=cam.fps)
 
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
@@ -90,12 +118,31 @@ async def run(app: AppConfig):
                 bench.mark_skipped()
                 continue
 
-            # Keep sample, print, publish
+            # Keep RAW sample for stats/plots (unchanged)
             bench.add_position(x_mm, y_mm)
             print(f"{x_mm:.10f}   |   {y_mm:.10f}")
-            await pub.publish_xy(x_mm, y_mm, angle_deg=0.0)
 
-            # Feed noise benchmark
+            # -------------------------------
+            # SELECT WHAT TO PUBLISH
+            # -------------------------------
+            if pub_fx is None:
+                out_x, out_y = x_mm, y_mm  # raw mode
+            else:
+                fx = pub_fx.process(x_mm)
+                fy = pub_fy.process(y_mm)
+                if fx is not None and fy is not None:
+                    out_x, out_y = fx, fy
+                else:
+                    # filter not warmed yet
+                    if FALLBACK_RAW_UNTIL_READY:
+                        out_x, out_y = x_mm, y_mm
+                    else:
+                        # skip publish this frame (but we still kept it above)
+                        continue
+
+            await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+
+            # Feed noise benchmark with RAW (consistent with your console stats)
             noise_bench.add(x_mm, y_mm)
 
     except KeyboardInterrupt:
@@ -103,12 +150,12 @@ async def run(app: AppConfig):
     finally:
         await pub.close()
         await stream.stop()  # drain subprocess first to avoid Proactor warnings
-        # Save the noise benchmark figure
         glitch.finish()
         filters.finish()
         repeat_probe.finish()
         noise_bench.finish()
         bench.print_summary("(kept samples)")
+
 
 if __name__ == "__main__":
     asyncio.run(run(AppConfig()))
