@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import welch, get_window
 import copy
 
-from .filters.base import BaseFilter
+from filters.base import BaseFilter
 
 
 class FilterBenchmarkCompare:
