@@ -12,14 +12,10 @@ from filters.base import BaseFilter
 
 class FilterBenchmarkCompare:
     """
-    Feed raw (x_mm, y_mm) to this during your run. It will run two filters
-    in parallel (independent instances for X and Y), and at finish() it will
-    render a 2x3 grid:
+    Compare two causal filters against RAW on time-trace and Welch PSD.
 
-      Row 1: DC-removed time traces (RAW, Filter A, Filter B)
-      Row 2: Welch PSDs mm^2/Hz (RAW, Filter A, Filter B)
-
-    Column titles include the filter name and its nominal delay in milliseconds.
+    Adds "Suggested Noise Floor (99.9% jitter ignored)" guide lines to the
+    time-trace panels for RAW, Filter A, and Filter B (X and Y separately).
     """
 
     def __init__(
@@ -29,10 +25,13 @@ class FilterBenchmarkCompare:
         fps_hint: Optional[float],
         out_path: str = "filter_compare.png",
         title: str = "Filter Comparison",
+        *,
+        floor_q: float = 99.9  # quantile for "suggested noise floor"
     ):
         self.fps = float(fps_hint) if fps_hint else None
         self.out_path = out_path
         self.title = title
+        self.floor_q = float(floor_q)
 
         # Clone per-axis so states are independent
         self.fx_a = copy.deepcopy(filter_a)
@@ -62,6 +61,16 @@ class FilterBenchmarkCompare:
     @staticmethod
     def _dc(arr: np.ndarray) -> np.ndarray:
         return arr - float(np.median(arr)) if arr.size else arr
+
+    @staticmethod
+    def _noise_floor_p999(dev: np.ndarray, q: float) -> float:
+        """
+        Suggested Noise Floor: percentile(|dev|, q).
+        dev should already be median-removed.
+        """
+        if dev.size == 0:
+            return float("nan")
+        return float(np.percentile(np.abs(dev), q))
 
     def _welch(self, dev: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         if self.fps is None or dev.size < 32:
@@ -100,6 +109,14 @@ class FilterBenchmarkCompare:
         xa_d = self._dc(xa); ya_d = self._dc(ya)
         xb_d = self._dc(xb); yb_d = self._dc(yb)
 
+        # Compute noise floors (per-axis)
+        nf_raw_x = self._noise_floor_p999(xr_d, self.floor_q)
+        nf_raw_y = self._noise_floor_p999(yr_d, self.floor_q)
+        nf_a_x   = self._noise_floor_p999(xa_d, self.floor_q) if xa_d.size else float("nan")
+        nf_a_y   = self._noise_floor_p999(ya_d, self.floor_q) if ya_d.size else float("nan")
+        nf_b_x   = self._noise_floor_p999(xb_d, self.floor_q) if xb_d.size else float("nan")
+        nf_b_y   = self._noise_floor_p999(yb_d, self.floor_q) if yb_d.size else float("nan")
+
         # Figure
         fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
         fig.suptitle(self.title)
@@ -111,30 +128,35 @@ class FilterBenchmarkCompare:
         ttl_a   = f"{str(self.fx_a)} (delay ≈ {da_ms:.2f} ms)" if da_ms is not None else str(self.fx_a)
         ttl_b   = f"{str(self.fx_b)} (delay ≈ {db_ms:.2f} ms)" if db_ms is not None else str(self.fx_b)
 
-        # ---- Row 1: time traces (X & Y overlays) ----
-        panels = [
-            (axes[0, 0], xr_d, yr_d, ttl_raw),
-            (axes[0, 1], xa_d, ya_d, ttl_a),
-            (axes[0, 2], xb_d, yb_d, ttl_b),
-        ]
-        for ax, dx, dy, title in panels:
+        # ---- Row 1: time traces (X & Y) + noise floor lines ----
+        def _plot_trace_with_nf(ax, dx, dy, title, nfx, nfy):
+            n = max(dx.size, dy.size)
             if dx.size:
                 ax.plot(np.arange(dx.size), dx, linewidth=0.8, label="X dev [mm]")
             if dy.size:
                 ax.plot(np.arange(dy.size), dy, linewidth=0.8, label="Y dev [mm]")
+            # Add NF lines if finite
+            if np.isfinite(nfx) and n > 0:
+                ax.hlines([+nfx, -nfx], 0, n - 1, linestyles="--", linewidth=1.0, label=f"X NF={nfx:.6g} mm")
+            if np.isfinite(nfy) and n > 0:
+                ax.hlines([+nfy, -nfy], 0, n - 1, linestyles=":", linewidth=1.0, label=f"Y NF={nfy:.6g} mm")
             ax.set_title(title)
             ax.set_xlabel("Sample index")
             ax.set_ylabel("Deviation [mm]")
             ax.grid(True, alpha=0.3)
             ax.legend(loc="upper right", fontsize=9)
 
+        _plot_trace_with_nf(axes[0, 0], xr_d, yr_d, ttl_raw, nf_raw_x, nf_raw_y)
+        _plot_trace_with_nf(axes[0, 1], xa_d, ya_d, ttl_a,   nf_a_x,   nf_a_y)
+        _plot_trace_with_nf(axes[0, 2], xb_d, yb_d, ttl_b,   nf_b_x,   nf_b_y)
+
         # ---- Row 2: Welch PSDs ----
         panels = [
-            (axes[1, 0], xr_d, yr_d, ttl_raw),
-            (axes[1, 1], xa_d, ya_d, ttl_a),
-            (axes[1, 2], xb_d, yb_d, ttl_b),
+            (axes[1, 0], xr_d, yr_d),
+            (axes[1, 1], xa_d, ya_d),
+            (axes[1, 2], xb_d, yb_d),
         ]
-        for ax, dx, dy, title in panels:
+        for ax, dx, dy in panels:
             fx, Px = self._welch(dx) if dx.size else (None, None)
             fy, Py = self._welch(dy) if dy.size else (None, None)
             if fx is not None and Px is not None and np.any(fx > 0):
@@ -152,4 +174,13 @@ class FilterBenchmarkCompare:
         fig.savefig(self.out_path, dpi=150)
         plt.close(fig)
         print(f"FilterBenchmarkCompare: saved figure to {self.out_path}")
+
+        # Optional: print the floors (handy for quick eyeballing)
+        print("\n--- Suggested Noise Floor (99.9% jitter ignored) ---")
+        print(f"RAW   : X={nf_raw_x:.10f} mm, Y={nf_raw_y:.10f} mm")
+        if np.isfinite(nf_a_x) or np.isfinite(nf_a_y):
+            print(f"Filt A: X={nf_a_x:.10f} mm, Y={nf_a_y:.10f} mm  ({self.fx_a})")
+        if np.isfinite(nf_b_x) or np.isfinite(nf_b_y):
+            print(f"Filt B: X={nf_b_x:.10f} mm, Y={nf_b_y:.10f} mm  ({self.fx_b})")
+
         return self.out_path
