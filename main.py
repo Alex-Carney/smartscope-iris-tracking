@@ -21,6 +21,7 @@ from fft_benchmark import NoiseBenchmark
 from fps_glitch_benchmark import FPSGlitchBenchmark
 from frame_repeat_probe import FrameRepeatProbe
 from time_accounting import TimeAccounting
+from noise_adaptive_filter import NoiseAdaptiveFilter2D
 from config import AppConfig
 
 
@@ -33,29 +34,15 @@ async def run(app: AppConfig):
     run_cfg = app.run
 
     # --------------------------------------------
-    # FILTERS: define two to compare
+    # FILTERS: define two to compare (kept as-is)
     # --------------------------------------------
     filter_A = EMA(alpha=0.25)
     filter_B = CascadedEMA(alpha=0.2, stages=3)
 
-    # --------------------------------------------
-    # SIMPLE SWITCH: what do we send to NATS?
-    #   "raw"       -> publish raw positions
-    #   "filter_a"  -> publish filter_A output
-    #   "filter_b"  -> publish filter_B output
-    # If using a filter, we can optionally publish RAW until filter warm-up
-    # --------------------------------------------
-    PUBLISH_MODE = "filter_a"          # "raw" | "filter_a" | "filter_b"
-    FALLBACK_RAW_UNTIL_READY = True
+    # (REMOVED old publish switch; we now adaptively filter only sub-noise)
+    # PUBLISH_MODE / pub_fx / pub_fy block deleted
 
-    # Dedicated per-axis instances for the publish path (do not reuse comparator's)
-    pub_fx = pub_fy = None
-    if PUBLISH_MODE == "filter_a":
-        pub_fx, pub_fy = filter_A.copy(), filter_A.copy()
-    elif PUBLISH_MODE == "filter_b":
-        pub_fx, pub_fy = filter_B.copy(), filter_B.copy()
-
-    # Comparator (makes its own internal copies)
+    # Comparator (unchanged)
     filters = FilterBenchmarkCompare(
         filter_a=filter_A,
         filter_b=filter_B,
@@ -80,10 +67,21 @@ async def run(app: AppConfig):
     # Noise benchmark (uses camera FPS as sampling rate)
     noise_bench = NoiseBenchmark(out_path="noise_benchmark.png", fps_hint=cam.fps)
 
+    subnoise_fx = Boxcar(N=15)
+    subnoise_fy = Boxcar(N=15)
+    noise_adaptive_filter = NoiseAdaptiveFilter2D(
+        subnoise_fx, subnoise_fy,
+        use_radial=ngc.use_radial,
+        floor_mm=ngc.floor_mm,
+        floor_x_mm=ngc.floor_x_mm,
+        floor_y_mm=ngc.floor_y_mm,
+    )
+
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
     await stream.start()
     first_frame_saved = False
+    last_published = None  # (x,y) of what we actually sent to NATS last
 
     try:
         while len(bench.positions) < run_cfg.max_samples:
@@ -92,6 +90,7 @@ async def run(app: AppConfig):
                 break
             timer.start_frame()
             bench.mark_processed()
+
             frame = decoder.decode_bgr(jpg_bytes)
             timer.mark("jpeg_decode")
             now = time.perf_counter()
@@ -114,6 +113,7 @@ async def run(app: AppConfig):
             timer.mark("aruco detect")
             if mm is None:
                 continue
+
             bench.mark_with_marker()
             x_mm, y_mm = mm
             now = time.perf_counter()
@@ -121,33 +121,20 @@ async def run(app: AppConfig):
             glitch.add(now, x_mm, y_mm)
             bench.tick_fps()
 
-            if not noise_gate.should_send(x_mm, y_mm):
-                bench.mark_skipped()
-                continue
+            # (OLD) noise gate skip is REMOVED — we don't drop sub-noise anymore
+            # if not noise_gate.should_send(x_mm, y_mm):
+            #     bench.mark_skipped()
+            #     continue
 
             # Keep RAW sample for stats/plots (unchanged)
             bench.add_position(x_mm, y_mm)
-            # print(f"{x_mm:.10f}   |   {y_mm:.10f}")
 
-            # -------------------------------
-            # SELECT WHAT TO PUBLISH
-            # -------------------------------
-            if pub_fx is None:
-                out_x, out_y = x_mm, y_mm  # raw mode
-            else:
-                fx = pub_fx.process(x_mm)
-                fy = pub_fy.process(y_mm)
-                if fx is not None and fy is not None:
-                    out_x, out_y = fx, fy
-                else:
-                    # filter not warmed yet
-                    if FALLBACK_RAW_UNTIL_READY:
-                        out_x, out_y = x_mm, y_mm
-                    else:
-                        # skip publish this frame (but we still kept it above)
-                        continue
+            # --- NEW: adaptive sub-noise filtering ---
+            out_x, out_y, mode = noise_adaptive_filter.process(x_mm, y_mm, last_published)
+            # (optional debug) # if bench.samples % 200 == 0: print(mode)
 
             await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+            last_published = (out_x, out_y)
 
             # Feed noise benchmark with RAW (consistent with your console stats)
             noise_bench.add(x_mm, y_mm)
@@ -163,6 +150,7 @@ async def run(app: AppConfig):
         filters.finish()
         repeat_probe.finish()
         noise_bench.finish()
+        print(noise_adaptive_filter.summary())   # NEW: one-line adaptive filter summary
         bench.print_summary("(kept samples)")
 
 
