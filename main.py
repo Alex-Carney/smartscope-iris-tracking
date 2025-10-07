@@ -36,7 +36,7 @@ async def run(app: AppConfig):
     # --------------------------------------------
     # FILTERS: define two to compare (unchanged)
     # --------------------------------------------
-    filter_A = EMA(alpha=0.25)
+    filter_A = Boxcar(N=27)
     filter_B = CascadedEMA(alpha=0.2, stages=3)
 
     # --------------------------------------------
@@ -46,7 +46,7 @@ async def run(app: AppConfig):
     #   "filter_b"  -> publish filter_B output
     # If using a filter, we can optionally publish RAW until filter warm-up
     # --------------------------------------------
-    PUBLISH_MODE = "raw"          # "raw" | "filter_a" | "filter_b"
+    PUBLISH_MODE = "filter_a"          # "raw" | "filter_a" | "filter_b"
     FALLBACK_RAW_UNTIL_READY = True
 
     # Dedicated per-axis instances for the publish path (do not reuse comparator's)
@@ -110,6 +110,7 @@ async def run(app: AppConfig):
         while len(bench.positions) < run_cfg.max_samples:
             jpg_bytes = await stream.read_jpeg()
             if jpg_bytes is None:
+                print('\n\n\n MAJOR GLITCH OCCURED. BREAKING --- stream read returned None --- \n\n\n')
                 break
             timer.start_frame()
             bench.mark_processed()
@@ -171,13 +172,11 @@ async def run(app: AppConfig):
                         # skip publish this frame (but we still kept it above)
                         continue
 
-            await pub.publish_xy(out_x, out_y, angle_deg=0.0)
-
             # Feed noise benchmark with RAW (consistent with your console stats)
             noise_bench.add(x_mm, y_mm)
             timer.mark("End")
             timer.end_frame()
-
+        print("Main loop ended.")
     except KeyboardInterrupt:
         pass
     except Exception as e:
@@ -194,3 +193,6 @@ async def run(app: AppConfig):
         corner_bench.finish()
         print(naf.summary())
         bench.print_summary("(published samples)")
+
+if __name__ == "__main__":
+    asyncio.run(run(AppConfig()))

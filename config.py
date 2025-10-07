@@ -7,7 +7,7 @@ class CameraConfig:
     device_name: str = "Global Shutter Camera"
     width: int = 1920
     height: int = 1200
-    fps: int = 60
+    fps: int = 30
     # ffmpeg uses dshow on Windows; adjust if you change platforms
 
 @dataclass
@@ -55,7 +55,7 @@ class NoiseGateConfig:
 
 @dataclass
 class RunConfig:
-    max_samples: int = 100000
+    max_samples: int = 1000
     save_first_frame: bool = True
     save_first_frame_path: str = "frame_undistorted.png"
 
