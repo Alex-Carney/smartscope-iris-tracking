@@ -22,6 +22,7 @@ from fps_glitch_benchmark import FPSGlitchBenchmark
 from frame_repeat_probe import FrameRepeatProbe
 from time_accounting import TimeAccounting
 from noise_adaptive_filter import NoiseAdaptiveDualFloor2D
+from corner_stats_benchmark import CornerStatsBenchmark
 from config import AppConfig
 
 async def run(app: AppConfig):
@@ -61,6 +62,7 @@ async def run(app: AppConfig):
     bench = BasicBenchmark()
 
     noise_bench = NoiseBenchmark(out_path="noise_benchmark.png", fps_hint=cam.fps)
+    corner_bench = CornerStatsBenchmark(aruco_w_mm = arc.aruco_w_mm, aruco_h_mm = arc.aruco_h_mm, fps_hint = cam.fps, out_path = "corner_stats.png",title = "Corner per-axis noise")
 
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
@@ -113,16 +115,19 @@ async def run(app: AppConfig):
             repeat_probe.add_gray(gray)
 
             und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
-            mm = tracker.detect_mm(gray, und_points_fn)
-            timer.mark("aruco detect")
-            if mm is None:
-                continue
+            result = tracker.detect_mm(gray, und_points_fn)
+            if result is None: continue
 
+            timer.mark("aruco detect")
             bench.mark_with_marker()
+
+            mm, corners_px = result
             x_mm, y_mm = mm
+
             now = time.perf_counter()
             filters.add(x_mm, y_mm)
             glitch.add(now, x_mm, y_mm)
+            corner_bench.add(corners_px)
             bench.tick_fps()
 
             # Feed noise benchmark with RAW always (for apples-to-apples)
@@ -152,5 +157,6 @@ async def run(app: AppConfig):
         filters.finish()
         repeat_probe.finish()
         noise_bench.finish()
+        corner_bench.finish()
         print(naf.summary())
         bench.print_summary("(published samples)")
