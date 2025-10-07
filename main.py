@@ -21,9 +21,8 @@ from fft_benchmark import NoiseBenchmark
 from fps_glitch_benchmark import FPSGlitchBenchmark
 from frame_repeat_probe import FrameRepeatProbe
 from time_accounting import TimeAccounting
-from noise_adaptive_filter import NoiseAdaptiveFilter2D
+from noise_adaptive_filter import NoiseAdaptiveDualFloor2D
 from config import AppConfig
-
 
 async def run(app: AppConfig):
     cam = app.camera
@@ -34,13 +33,10 @@ async def run(app: AppConfig):
     run_cfg = app.run
 
     # --------------------------------------------
-    # FILTERS: define two to compare (kept as-is)
+    # FILTERS: define two to compare (unchanged)
     # --------------------------------------------
     filter_A = EMA(alpha=0.25)
     filter_B = CascadedEMA(alpha=0.2, stages=3)
-
-    # (REMOVED old publish switch; we now adaptively filter only sub-noise)
-    # PUBLISH_MODE / pub_fx / pub_fy block deleted
 
     # Comparator (unchanged)
     filters = FilterBenchmarkCompare(
@@ -64,24 +60,32 @@ async def run(app: AppConfig):
     noise_gate = NoiseGate(ngc.enable, ngc.use_radial, ngc.floor_mm, ngc.floor_x_mm, ngc.floor_y_mm)
     bench = BasicBenchmark()
 
-    # Noise benchmark (uses camera FPS as sampling rate)
     noise_bench = NoiseBenchmark(out_path="noise_benchmark.png", fps_hint=cam.fps)
-
-    subnoise_fx = Boxcar(N=15)
-    subnoise_fy = Boxcar(N=15)
-    noise_adaptive_filter = NoiseAdaptiveFilter2D(
-        subnoise_fx, subnoise_fy,
-        use_radial=ngc.use_radial,
-        floor_mm=ngc.floor_mm,
-        floor_x_mm=ngc.floor_x_mm,
-        floor_y_mm=ngc.floor_y_mm,
-    )
 
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
     await stream.start()
     first_frame_saved = False
-    last_published = None  # (x,y) of what we actually sent to NATS last
+
+    # ---- NEW: sub-noise filter used by the adaptive logic ----
+    subnoise_fx = Boxcar(N=15)
+    subnoise_fy = Boxcar(N=15)
+
+    # Pick Layer-2 floor (T2). Example: 10x lower than T1.
+    T2_SCALE = 0.10
+    floor2_mm   = max(1e-12, ngc.floor_mm   * T2_SCALE)
+    floor2_x_mm = max(1e-12, ngc.floor_x_mm * T2_SCALE)
+    floor2_y_mm = max(1e-12, ngc.floor_y_mm * T2_SCALE)
+
+    naf = NoiseAdaptiveDualFloor2D(
+        subnoise_fx, subnoise_fy,
+        use_radial=ngc.use_radial,
+        floor1_mm=ngc.floor_mm, floor1_x_mm=ngc.floor_x_mm, floor1_y_mm=ngc.floor_y_mm,
+        floor2_mm=floor2_mm,   floor2_x_mm=floor2_x_mm,   floor2_y_mm=floor2_y_mm,
+        drop_during_warmup=True,  # drop noise until filter is warm
+    )
+
+    last_published = None
 
     try:
         while len(bench.positions) < run_cfg.max_samples:
@@ -121,38 +125,32 @@ async def run(app: AppConfig):
             glitch.add(now, x_mm, y_mm)
             bench.tick_fps()
 
-            # (OLD) noise gate skip is REMOVED — we don't drop sub-noise anymore
-            # if not noise_gate.should_send(x_mm, y_mm):
-            #     bench.mark_skipped()
-            #     continue
-
-            # Keep RAW sample for stats/plots (unchanged)
-            bench.add_position(x_mm, y_mm)
-
-            # --- NEW: adaptive sub-noise filtering ---
-            out_x, out_y, mode = noise_adaptive_filter.process(x_mm, y_mm, last_published)
-            # (optional debug) # if bench.samples % 200 == 0: print(mode)
-
-            await pub.publish_xy(out_x, out_y, angle_deg=0.0)
-            last_published = (out_x, out_y)
-
-            # Feed noise benchmark with RAW (consistent with your console stats)
+            # Feed noise benchmark with RAW always (for apples-to-apples)
             noise_bench.add(x_mm, y_mm)
+
+            # --- NEW: two-layer adaptive decision ---
+            publish, out_x, out_y, mode = naf.process(x_mm, y_mm, last_published)
+
+            if publish:
+                await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+                last_published = (out_x, out_y)
+                # Count as "kept" only when we actually publish
+                bench.add_position(x_mm, y_mm)
+            else:
+                # Optional accounting for drops (under T2 or warming)
+                bench.mark_skipped()
+
             timer.end_frame()
 
     except KeyboardInterrupt:
         pass
     finally:
         await pub.close()
-        await stream.stop()  # drain subprocess first to avoid Proactor warnings
+        await stream.stop()
         glitch.finish()
         timer.finish()
         filters.finish()
         repeat_probe.finish()
         noise_bench.finish()
-        print(noise_adaptive_filter.summary())   # NEW: one-line adaptive filter summary
-        bench.print_summary("(kept samples)")
-
-
-if __name__ == "__main__":
-    asyncio.run(run(AppConfig()))
+        print(naf.summary())
+        bench.print_summary("(published samples)")
