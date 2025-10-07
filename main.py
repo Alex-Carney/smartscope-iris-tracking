@@ -45,7 +45,7 @@ async def run(app: AppConfig):
     #   "filter_b"  -> publish filter_B output
     # If using a filter, we can optionally publish RAW until filter warm-up
     # --------------------------------------------
-    PUBLISH_MODE = "filter_a"          # "raw" | "filter_a" | "filter_b"
+    PUBLISH_MODE = "raw"          # "raw" | "filter_a" | "filter_b"
     FALLBACK_RAW_UNTIL_READY = True
 
     # Dedicated per-axis instances for the publish path (do not reuse comparator's)
@@ -151,10 +151,14 @@ async def run(app: AppConfig):
 
             # Feed noise benchmark with RAW (consistent with your console stats)
             noise_bench.add(x_mm, y_mm)
+            timer.mark("End")
             timer.end_frame()
 
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        print(f"Exception occurred: {e}")
+        raise
     finally:
         await pub.close()
         await stream.stop()  # drain subprocess first to avoid Proactor warnings

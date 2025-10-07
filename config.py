@@ -7,7 +7,7 @@ class CameraConfig:
     device_name: str = "Global Shutter Camera"
     width: int = 1920
     height: int = 1200
-    fps: int = 30
+    fps: int = 60
     # ffmpeg uses dshow on Windows; adjust if you change platforms
 
 @dataclass
@@ -19,8 +19,8 @@ class ArucoConfig:
 
 @dataclass
 class UndistortConfig:
-    enable_frame_undistort: bool = True # remap each frame
-    enable_corner_undistort: bool = True # undistort corners before subpix
+    enable_frame_undistort: bool = False # remap each frame
+    enable_corner_undistort: bool = False # undistort corners before subpix
     camera_matrix: List[List[float]] = field(default_factory=lambda: [
     [9.41642211e+03, 0.0, 9.64483756e+02],
     [0.0, 9.40228615e+03, 6.08511402e+02],
@@ -55,7 +55,7 @@ class NoiseGateConfig:
 
 @dataclass
 class RunConfig:
-    max_samples: int = 1000
+    max_samples: int = 100000
     save_first_frame: bool = True
     save_first_frame_path: str = "frame_undistorted.png"
 
