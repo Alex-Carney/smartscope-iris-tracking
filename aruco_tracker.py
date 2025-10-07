@@ -51,12 +51,23 @@ class ArucoTracker:
         except Exception:
             return c_in
 
-    def detect_mm(self, gray: np.ndarray, undistort_points_fn=None) -> Optional[Tuple[float, float]]:
+    def detect_mm(
+        self,
+        gray: np.ndarray,
+        undistort_points_fn=None
+    ) -> Optional[Tuple[Tuple[float, float], np.ndarray]]:
+        """
+        Detect the ArUco marker, refine corners, and return:
+            ((x_mm, y_mm), corners_px)
+        where corners_px is shape (4,2) float32 in pixel coordinates.
+
+        Returns None if no marker (or target ID) is found or geometry is degenerate.
+        """
         corners, ids, _ = self.detector.detectMarkers(gray)
         if ids is None or len(corners) == 0:
             return None
+
         # Find target ID if present, else use first marker
-        idx = None
         if self.aruco_id is not None and ids is not None:
             matches = np.where(ids.flatten() == self.aruco_id)[0]
             if len(matches) == 0:
@@ -64,11 +75,23 @@ class ArucoTracker:
             idx = int(matches[0])
         else:
             idx = 0
+
         c = corners[idx].astype(np.float32).reshape(1, 4, 2)
+
+        # Optional undistort to pixel coordinates
         if undistort_points_fn is not None:
             c = undistort_points_fn(c)
-        c = self._safe_refine_subpix(gray, c)
-        return self._px_to_mm_center(c)
+
+        # Safe subpixel refinement
+        c_ref = self._safe_refine_subpix(gray, c)
+        corners_px = c_ref.reshape(4, 2).astype(np.float32)
+
+        # Convert center to mm using per-frame pixel scale
+        center_mm = self._px_to_mm_center(corners_px)
+        if center_mm is None:
+            return None
+
+        return center_mm, corners_px
 
     def _px_to_mm_center(self, corners: np.ndarray) -> Optional[Tuple[float, float]]:
         c = corners.reshape(4, 2)
