@@ -171,11 +171,11 @@ async def run(app: AppConfig):
             repeat_probe.add_gray(gray)
 
             und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
-            result = tracker.detect_mm(gray, und_points_fn)
+            result = tracker.detect_mm(gray, und_points_fn, timer=timer)
             if result is None:
                 continue  # IMPORTANT: no predict-only step per your request
 
-            timer.mark("aruco detect")
+            # timer.mark("aruco detect")
             bench.mark_with_marker()
 
             # Unpack detection

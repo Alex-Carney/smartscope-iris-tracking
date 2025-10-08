@@ -11,7 +11,7 @@ class TimeAccounting:
     Per-frame timing for named processing steps.
 
     Usage:
-        fa = FrameAccounting(out_path="frame_accounting.png")
+        fa = TimeAccounting(out_path="frame_accounting.png")
         fa.start_frame()
         ... work ...
         fa.mark("decode")
@@ -27,11 +27,15 @@ class TimeAccounting:
         self,
         out_path: str = "frame_accounting.png",
         budgets_fps: List[float] = (30.0, 60.0, 90.0),
-        title: str = "Frame Accounting (avg durations)"
+        title: str = "Frame Accounting (avg durations)",
+        xtick_rotation: float = 45.0,        # NEW: rotate x tick labels
+        wrap_colon: bool = True,             # NEW: split "group:step" onto 2 lines
     ):
         self.out_path = out_path
         self.budgets_fps = list(budgets_fps)
         self.title = title
+        self.xtick_rotation = float(xtick_rotation)
+        self.wrap_colon = bool(wrap_colon)
 
         self._t0: Optional[float] = None
         self._t_last: Optional[float] = None
@@ -83,6 +87,19 @@ class TimeAccounting:
     def _avg_total(self) -> float:
         return float(np.mean(self._frame_total_ms)) if self._frame_total_ms else float("nan")
 
+    def _format_labels(self, labels: List[str]) -> List[str]:
+        if not self.wrap_colon:
+            return labels
+        out = []
+        for s in labels:
+            # split at first colon -> "group:\nstep"
+            if ":" in s:
+                a, b = s.split(":", 1)
+                out.append(f"{a}:\n{b}")
+            else:
+                out.append(s)
+        return out
+
     def finish(self) -> Optional[str]:
         if not self._frame_total_ms:
             print("FrameAccounting: no frames recorded.")
@@ -94,7 +111,7 @@ class TimeAccounting:
         total_mean = self._avg_total()
 
         # ---- Plot ----
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(14, 6))  # a bit wider helps
         x = np.arange(len(step_labels) + 1)  # steps + TOTAL
         heights = step_means + [sum(step_means)]  # show sum of steps as "Total"
         bars = ax.bar(x, heights, width=0.7)
@@ -117,13 +134,23 @@ class TimeAccounting:
                     va="center", fontsize=9)
 
         # Pretty axes
+        labels_fmt = self._format_labels(step_labels + ["Total"])
         ax.set_xticks(x)
-        ax.set_xticklabels(step_labels + ["Total"], rotation=0)
+        ax.set_xticklabels(
+            labels_fmt,
+            rotation=self.xtick_rotation,
+            ha="right",
+            rotation_mode="anchor"
+        )
+        ax.tick_params(axis="x", labelsize=9)
         ax.set_ylabel("Average duration [ms]")
         ax.set_title(self.title + f"\nAvg frame total = {total_mean:.2f} ms")
         ax.grid(True, axis="y", alpha=0.3)
 
+        # Extra bottom margin so rotated labels don't clip
         fig.tight_layout()
+        fig.subplots_adjust(bottom=0.25)
+
         fig.savefig(self.out_path, dpi=150)
         plt.close(fig)
         print(f"FrameAccounting: saved {self.out_path}")
