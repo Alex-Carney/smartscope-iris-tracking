@@ -113,20 +113,13 @@ async def run(app: AppConfig):
         print(f"Failed to load corner_cov.npy: {e}. Using default R.")
         R_meas = None
 
-    Q_accel_value = 1e5  # increase by decades to hug motion harder
+    Q_ACCEL_X = 1e7  # increase by decades to hug motion harder
+    Q_ACCEL_Y = 1e7
+    Q_ACCEL_NON_RIGID = 1e2 # set to 0 for rigid target
 
-    kf = CornerKalman(CornerKFConfig(
-        fps=cam.fps,
-        q_accel=Q_accel_value,
-        R=R_meas
-    ))
 
-    kal_bench = KalmanBenchmark(KalmanBenchmarkConfig(
-        out_path="kalman_benchmark.png",
-        fps_hint=cam.fps,
-        title="Kalman vs RAW (center)"
-    ))
-
+    kf = CornerKalman(CornerKFConfig(fps=cam.fps,process_mode="common_xy_plus_eps", q_common_y=Q_ACCEL_Y, q_eps=Q_ACCEL_NON_RIGID, R=R_meas))
+    kal_bench = KalmanBenchmark(KalmanBenchmarkConfig(out_path="kalman_benchmark.png",fps_hint=cam.fps,title="Kalman vs RAW (center)"))
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
     await stream.start()
