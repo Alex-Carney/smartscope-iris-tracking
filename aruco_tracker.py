@@ -20,7 +20,7 @@ class ArucoTracker:
             c = c_in
             xmin = float(np.min(c[0, :, 0])); xmax = float(np.max(c[0, :, 0]))
             ymin = float(np.min(c[0, :, 1])); ymax = float(np.max(c[0, :, 1]))
-            DESIRED_WIN = 11
+            DESIRED_WIN = 5
             pad = max(12, 2 * DESIRED_WIN + 6)
             x0 = int(max(0, np.floor(xmin) - pad))
             y0 = int(max(0, np.floor(ymin) - pad))
@@ -94,12 +94,24 @@ class ArucoTracker:
         return center_mm, corners_px
 
     def _px_to_mm_center(self, corners: np.ndarray) -> Optional[Tuple[float, float]]:
-        c = corners.reshape(4, 2)
-        px_w = float(np.linalg.norm(c[1] - c[0]))
-        px_h = float(np.linalg.norm(c[2] - c[1]))
+        """
+        Affine (flat) model:
+        center_px = mean of 4 vertices (linear, KF-friendly)
+        scale: mm/px per axis from average of opposite edges (lower noise)
+        """
+        c = corners.reshape(4, 2).astype(np.float64)  # TL,TR,BR,BL (OpenCV)
+
+        # Linear center in pixels
+        ctr_px = c.mean(axis=0)           # == 0.5*(c0+c2) == 0.5*(c1+c3)
+        cx_px, cy_px = float(ctr_px[0]), float(ctr_px[1])
+
+        # Per-axis mm/px from opposite edges (still simple, just less noisy)
+        px_w = 0.5 * (np.linalg.norm(c[1] - c[0]) + np.linalg.norm(c[2] - c[3]))
+        px_h = 0.5 * (np.linalg.norm(c[2] - c[1]) + np.linalg.norm(c[3] - c[0]))
         if px_w <= 0.0 or px_h <= 0.0:
             return None
-        mm_per_px_x = self.w_mm / px_w
-        mm_per_px_y = self.h_mm / px_h
-        ctr = np.mean(c, axis=0)
-        return float(ctr[0] * mm_per_px_x), float(ctr[1] * mm_per_px_y)
+        sx = self.w_mm / px_w
+        sy = self.h_mm / px_h
+
+        return cx_px * sx, cy_px * sy
+
