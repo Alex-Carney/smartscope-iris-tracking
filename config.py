@@ -5,9 +5,9 @@ import numpy as np
 @dataclass
 class CameraConfig:
     device_name: str = "Global Shutter Camera"
-    width: int = 1920
+    width: int = 1600
     height: int = 1200
-    fps: int = 30
+    fps: int = 90
     # ffmpeg uses dshow on Windows; adjust if you change platforms
 
 @dataclass
