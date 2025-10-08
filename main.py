@@ -26,7 +26,7 @@ from time_accounting import TimeAccounting
 from noise_adaptive_filter import NoiseAdaptiveDualFloor2D
 from corner_stats_benchmark import CornerStatsBenchmark
 
-# NEW: Kalman stuff
+# NEW: Kalman
 from kf_corner import CornerKalman, CornerKFConfig
 from kalman_benchmark import KalmanBenchmark, KalmanBenchmarkConfig
 
@@ -52,8 +52,9 @@ async def run(app: AppConfig):
     #   "raw"       -> publish raw positions
     #   "filter_a"  -> publish filter_A output
     #   "filter_b"  -> publish filter_B output
+    #   "kf"        -> publish Kalman-filtered center
     # --------------------------------------------
-    PUBLISH_MODE = "filter_a"          # "raw" | "filter_a" | "filter_b"
+    PUBLISH_MODE = "kf"                # "raw" | "filter_a" | "filter_b" | "kf"
     FALLBACK_RAW_UNTIL_READY = True
 
     # Dedicated per-axis instances for the publish path (do not reuse comparator's)
@@ -112,7 +113,7 @@ async def run(app: AppConfig):
         print(f"Failed to load corner_cov.npy: {e}. Using default R.")
         R_meas = None
 
-    Q_accel_value = 5e3  # increase by decades to hug motion harder
+    Q_accel_value = 1e5  # increase by decades to hug motion harder
 
     kf = CornerKalman(CornerKFConfig(
         fps=cam.fps,
@@ -200,9 +201,8 @@ async def run(app: AppConfig):
             # Feed raw center to the noise benchmark (once per frame)
             noise_bench.add(x_mm, y_mm)
 
-            # --------- KALMAN: build z (8,) in mm from corners and step ---------
+            # --------- KALMAN: measurement z (8,) in mm from corners and step ---------
             c = corners_px.astype(np.float64).reshape(4, 2)
-            # per-axis mm/px from opposite edges (simple + stable)
             px_w = 0.5 * (np.linalg.norm(c[1] - c[0]) + np.linalg.norm(c[2] - c[3]))
             px_h = 0.5 * (np.linalg.norm(c[2] - c[1]) + np.linalg.norm(c[3] - c[0]))
             if px_w <= 0 or px_h <= 0:
@@ -217,38 +217,46 @@ async def run(app: AppConfig):
                 z_mm[2*i + 0] = c[i, 0] * sx
                 z_mm[2*i + 1] = c[i, 1] * sy
 
-            pos8, vel8 = kf.step(z_mm)  # update-only (we skipped predict-only earlier)
+            pos8, vel8 = kf.step(z_mm)
             kx, ky = kf.get_center_mm()
             kal_bench.add(x_mm, y_mm, kx, ky)
             # --------------------------------------------------------------------
 
-            # --- Adaptive publish decision (unchanged) ---
-            publish, out_x, out_y, mode = naf.process(x_mm, y_mm, last_published)
-
-            if publish:
+            # -------------------------------
+            # SELECT WHAT TO PUBLISH
+            # -------------------------------
+            if PUBLISH_MODE == "kf":
+                # Publish Kalman-filtered center directly
+                out_x, out_y = kx, ky
                 await pub.publish_xy(out_x, out_y, angle_deg=0.0)
                 last_published = (out_x, out_y)
-                bench.add_position(x_mm, y_mm)  # count as kept only when we publish
+                bench.add_position(x_mm, y_mm)  # keep raw in stats
             else:
-                # fallback to simple filter mode for the NATS path if desired
-                if pub_fx is None:
-                    out_x, out_y = x_mm, y_mm
-                else:
-                    fx = pub_fx.process(x_mm)
-                    fy = pub_fy.process(y_mm)
-                    if fx is not None and fy is not None:
-                        out_x, out_y = fx, fy
-                    else:
-                        if FALLBACK_RAW_UNTIL_READY:
-                            out_x, out_y = x_mm, y_mm
-                        else:
-                            # skip publish this frame
-                            timer.mark("End")
-                            timer.end_frame()
-                            continue
+                # Existing adaptive-path for raw / filter_a / filter_b modes
+                publish, out_x, out_y, mode = naf.process(x_mm, y_mm, last_published)
 
-                await pub.publish_xy(out_x, out_y, angle_deg=0.0)
-                last_published = (out_x, out_y)
+                if publish:
+                    await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+                    last_published = (out_x, out_y)
+                    bench.add_position(x_mm, y_mm)  # count as kept only when we publish
+                else:
+                    if pub_fx is None:
+                        out_x, out_y = x_mm, y_mm
+                    else:
+                        fx = pub_fx.process(x_mm)
+                        fy = pub_fy.process(y_mm)
+                        if fx is not None and fy is not None:
+                            out_x, out_y = fx, fy
+                        else:
+                            if FALLBACK_RAW_UNTIL_READY:
+                                out_x, out_y = x_mm, y_mm
+                            else:
+                                timer.mark("End")
+                                timer.end_frame()
+                                continue
+
+                    await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+                    last_published = (out_x, out_y)
 
             timer.mark("End")
             timer.end_frame()
@@ -269,7 +277,7 @@ async def run(app: AppConfig):
         repeat_probe.finish()
         noise_bench.finish()
         corner_bench.finish()
-        kal_bench.finish()  # NEW: render KF vs RAW figure
+        kal_bench.finish()  # KF vs RAW figure
         print(naf.summary())
         bench.print_summary("(published samples)")
 
