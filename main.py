@@ -1,9 +1,11 @@
 # ASCII only
 import asyncio
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
+
 from ffmpeg_stream import FFMPEGMJPEGStream
 from filter_benchmark_compare import FilterBenchmarkCompare
 from filters.boxcar import Boxcar
@@ -23,7 +25,13 @@ from frame_repeat_probe import FrameRepeatProbe
 from time_accounting import TimeAccounting
 from noise_adaptive_filter import NoiseAdaptiveDualFloor2D
 from corner_stats_benchmark import CornerStatsBenchmark
+
+# NEW: Kalman stuff
+from kf_corner import CornerKalman, CornerKFConfig
+from kalman_benchmark import KalmanBenchmark, KalmanBenchmarkConfig
+
 from config import AppConfig
+
 
 async def run(app: AppConfig):
     cam = app.camera
@@ -44,7 +52,6 @@ async def run(app: AppConfig):
     #   "raw"       -> publish raw positions
     #   "filter_a"  -> publish filter_A output
     #   "filter_b"  -> publish filter_B output
-    # If using a filter, we can optionally publish RAW until filter warm-up
     # --------------------------------------------
     PUBLISH_MODE = "filter_a"          # "raw" | "filter_a" | "filter_b"
     FALLBACK_RAW_UNTIL_READY = True
@@ -65,6 +72,7 @@ async def run(app: AppConfig):
         title=f"Filter comparison {str(filter_A)} vs {str(filter_B)}"
     )
 
+    # --- STREAM/DECODE/PIPELINE ---
     stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
     decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
     timer = TimeAccounting()
@@ -78,15 +86,52 @@ async def run(app: AppConfig):
     noise_gate = NoiseGate(ngc.enable, ngc.use_radial, ngc.floor_mm, ngc.floor_x_mm, ngc.floor_y_mm)
     bench = BasicBenchmark()
 
+    # Noise benchmark (raw center)
     noise_bench = NoiseBenchmark(out_path="noise_benchmark.png", fps_hint=cam.fps)
-    corner_bench = CornerStatsBenchmark(aruco_w_mm = arc.aruco_w_mm, aruco_h_mm = arc.aruco_h_mm, fps_hint = cam.fps, out_path = "corner_stats.png",title = "Corner per-axis noise")
+
+    # Per-corner stats (raw corners)
+    corner_bench = CornerStatsBenchmark(
+        aruco_w_mm=arc.aruco_w_mm,
+        aruco_h_mm=arc.aruco_h_mm,
+        fps_hint=cam.fps,
+        out_path="corner_stats.png",
+        title="Corner per-axis noise"
+    )
+
+    # --- KALMAN: load R if available, create filter + benchmark ---
+    try:
+        npy_path = Path(__file__).with_name("corner_cov.npy")
+        R_meas = np.load(npy_path)  # expected 8x8 mm^2
+        if R_meas.shape != (8, 8):
+            print(f"corner_cov.npy has shape {R_meas.shape}, expected (8,8); ignoring.")
+            R_meas = None
+    except FileNotFoundError:
+        print("R was not measured yet (corner_cov.npy not found). Using default R.")
+        R_meas = None
+    except Exception as e:
+        print(f"Failed to load corner_cov.npy: {e}. Using default R.")
+        R_meas = None
+
+    Q_accel_value = 5e3  # increase by decades to hug motion harder
+
+    kf = CornerKalman(CornerKFConfig(
+        fps=cam.fps,
+        q_accel=Q_accel_value,
+        R=R_meas
+    ))
+
+    kal_bench = KalmanBenchmark(KalmanBenchmarkConfig(
+        out_path="kalman_benchmark.png",
+        fps_hint=cam.fps,
+        title="Kalman vs RAW (center)"
+    ))
 
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
     await stream.start()
     first_frame_saved = False
 
-    # ---- NEW: sub-noise filter used by the adaptive logic ----
+    # ---- sub-noise filter used by the adaptive logic ----
     subnoise_fx = Boxcar(N=15)
     subnoise_fy = Boxcar(N=15)
 
@@ -101,7 +146,7 @@ async def run(app: AppConfig):
         use_radial=ngc.use_radial,
         floor1_mm=ngc.floor_mm, floor1_x_mm=ngc.floor_x_mm, floor1_y_mm=ngc.floor_y_mm,
         floor2_mm=floor2_mm,   floor2_x_mm=floor2_x_mm,   floor2_y_mm=floor2_y_mm,
-        drop_during_warmup=True,  # drop noise until filter is warm
+        drop_during_warmup=True,
     )
 
     last_published = None
@@ -112,6 +157,7 @@ async def run(app: AppConfig):
             if jpg_bytes is None:
                 print('\n\n\n MAJOR GLITCH OCCURED. BREAKING --- stream read returned None --- \n\n\n')
                 break
+
             timer.start_frame()
             bench.mark_processed()
 
@@ -134,49 +180,81 @@ async def run(app: AppConfig):
 
             und_points_fn = undistorter.undistort_points if und.enable_corner_undistort else None
             result = tracker.detect_mm(gray, und_points_fn)
-            if result is None: continue
+            if result is None:
+                continue  # IMPORTANT: no predict-only step per your request
 
             timer.mark("aruco detect")
             bench.mark_with_marker()
 
-            mm, corners_px = result
-            x_mm, y_mm = mm
+            # Unpack detection
+            (center_mm, corners_px) = result
+            x_mm, y_mm = center_mm
 
+            # Benchmarks
             now = time.perf_counter()
             filters.add(x_mm, y_mm)
             glitch.add(now, x_mm, y_mm)
             corner_bench.add(corners_px)
             bench.tick_fps()
 
-            # Feed noise benchmark with RAW always (for apples-to-apples)
+            # Feed raw center to the noise benchmark (once per frame)
             noise_bench.add(x_mm, y_mm)
 
-            # --- NEW: two-layer adaptive decision ---
+            # --------- KALMAN: build z (8,) in mm from corners and step ---------
+            c = corners_px.astype(np.float64).reshape(4, 2)
+            # per-axis mm/px from opposite edges (simple + stable)
+            px_w = 0.5 * (np.linalg.norm(c[1] - c[0]) + np.linalg.norm(c[2] - c[3]))
+            px_h = 0.5 * (np.linalg.norm(c[2] - c[1]) + np.linalg.norm(c[3] - c[0]))
+            if px_w <= 0 or px_h <= 0:
+                # degenerate; skip KF this frame (but keep rest of pipeline)
+                continue
+
+            sx = arc.aruco_w_mm / px_w
+            sy = arc.aruco_h_mm / px_h
+
+            z_mm = np.empty(8, dtype=np.float64)
+            for i in range(4):
+                z_mm[2*i + 0] = c[i, 0] * sx
+                z_mm[2*i + 1] = c[i, 1] * sy
+
+            pos8, vel8 = kf.step(z_mm)  # update-only (we skipped predict-only earlier)
+            kx, ky = kf.get_center_mm()
+            kal_bench.add(x_mm, y_mm, kx, ky)
+            # --------------------------------------------------------------------
+
+            # --- Adaptive publish decision (unchanged) ---
             publish, out_x, out_y, mode = naf.process(x_mm, y_mm, last_published)
 
             if publish:
                 await pub.publish_xy(out_x, out_y, angle_deg=0.0)
                 last_published = (out_x, out_y)
-                # Count as "kept" only when we actually publish
-                bench.add_position(x_mm, y_mm)
+                bench.add_position(x_mm, y_mm)  # count as kept only when we publish
             else:
-                fx = pub_fx.process(x_mm)
-                fy = pub_fy.process(y_mm)
-                if fx is not None and fy is not None:
-                    out_x, out_y = fx, fy
+                # fallback to simple filter mode for the NATS path if desired
+                if pub_fx is None:
+                    out_x, out_y = x_mm, y_mm
                 else:
-                    # filter not warmed yet
-                    if FALLBACK_RAW_UNTIL_READY:
-                        out_x, out_y = x_mm, y_mm
+                    fx = pub_fx.process(x_mm)
+                    fy = pub_fy.process(y_mm)
+                    if fx is not None and fy is not None:
+                        out_x, out_y = fx, fy
                     else:
-                        # skip publish this frame (but we still kept it above)
-                        continue
+                        if FALLBACK_RAW_UNTIL_READY:
+                            out_x, out_y = x_mm, y_mm
+                        else:
+                            # skip publish this frame
+                            timer.mark("End")
+                            timer.end_frame()
+                            continue
 
-            # Feed noise benchmark with RAW (consistent with your console stats)
-            noise_bench.add(x_mm, y_mm)
+                await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+                last_published = (out_x, out_y)
+
             timer.mark("End")
             timer.end_frame()
+
         print("Main loop ended.")
+
     except KeyboardInterrupt:
         pass
     except Exception as e:
@@ -191,8 +269,10 @@ async def run(app: AppConfig):
         repeat_probe.finish()
         noise_bench.finish()
         corner_bench.finish()
+        kal_bench.finish()  # NEW: render KF vs RAW figure
         print(naf.summary())
         bench.print_summary("(published samples)")
+
 
 if __name__ == "__main__":
     asyncio.run(run(AppConfig()))
