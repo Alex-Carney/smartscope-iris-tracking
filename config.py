@@ -55,6 +55,7 @@ class NoiseGateConfig:
 
 @dataclass
 class RunConfig:
+    print_coords: bool = True
     max_samples: int = 1000
     save_first_frame: bool = True
     save_first_frame_path: str = "frame_undistorted.png"

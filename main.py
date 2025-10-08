@@ -54,7 +54,7 @@ async def run(app: AppConfig):
     #   "filter_b"  -> publish filter_B output
     #   "kf"        -> publish Kalman-filtered center
     # --------------------------------------------
-    PUBLISH_MODE = "kf"                # "raw" | "filter_a" | "filter_b" | "kf"
+    PUBLISH_MODE = "filter_a"                # "raw" | "filter_a" | "filter_b" | "kf"
     FALLBACK_RAW_UNTIL_READY = True
 
     # Dedicated per-axis instances for the publish path (do not reuse comparator's)
@@ -77,7 +77,8 @@ async def run(app: AppConfig):
     stream = FFMPEGMJPEGStream(cam.device_name, cam.width, cam.height, cam.fps)
     decoder = JPEGDecoder(jpg.libjpeg_turbo_path)
     timer = TimeAccounting()
-    tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm)
+    tracker = ArucoTracker(arc.dictionary, arc.aruco_id, arc.aruco_w_mm, arc.aruco_h_mm,frame_size_px=(cam.width, cam.height), isotropic_scale=False)
+
     glitch = FPSGlitchBenchmark(out_path="fps_glitch_benchmark.png")
     repeat_probe = FrameRepeatProbe(out_path="frame_repeat_probe.png")
 
@@ -101,7 +102,7 @@ async def run(app: AppConfig):
 
     # --- KALMAN: load R if available, create filter + benchmark ---
     try:
-        npy_path = Path(__file__).with_name("corner_cov.npy")
+        npy_path = Path(__file__).with_name("static_corner_cov.npy")
         R_meas = np.load(npy_path)  # expected 8x8 mm^2
         if R_meas.shape != (8, 8):
             print(f"corner_cov.npy has shape {R_meas.shape}, expected (8,8); ignoring.")
@@ -113,13 +114,10 @@ async def run(app: AppConfig):
         print(f"Failed to load corner_cov.npy: {e}. Using default R.")
         R_meas = None
 
-    Q_ACCEL_X = 1e7  # increase by decades to hug motion harder
-    Q_ACCEL_Y = 1e7
-    Q_ACCEL_NON_RIGID = 1e2 # set to 0 for rigid target
+    Q_VALUE = 1e-3
 
-
-    kf = CornerKalman(CornerKFConfig(fps=cam.fps,process_mode="common_xy_plus_eps", q_common_y=Q_ACCEL_Y, q_eps=Q_ACCEL_NON_RIGID, R=R_meas))
-    kal_bench = KalmanBenchmark(KalmanBenchmarkConfig(out_path="kalman_benchmark.png",fps_hint=cam.fps,title="Kalman vs RAW (center)"))
+    kf = CornerKalman(CornerKFConfig(fps=cam.fps, q_process=Q_VALUE, R=R_meas))
+    kal_bench = KalmanBenchmark(KalmanBenchmarkConfig(out_path="kalman_benchmark.png", fps_hint=cam.fps, title="Kalman vs RAW (center)"))
     pub = NatsPublisher(app.nats.servers, app.nats.subject, app.nats.enable)
     await pub.connect()
     await stream.start()
@@ -181,8 +179,9 @@ async def run(app: AppConfig):
             bench.mark_with_marker()
 
             # Unpack detection
-            (center_mm, corners_px) = result
-            x_mm, y_mm = center_mm
+            (mm, corners_px, fov_mm) = result
+            x_mm, y_mm = mm
+            fov_w_mm, fov_h_mm = fov_mm
 
             # Benchmarks
             now = time.perf_counter()
@@ -222,6 +221,7 @@ async def run(app: AppConfig):
                 # Publish Kalman-filtered center directly
                 out_x, out_y = kx, ky
                 await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+                if run_cfg.print_coords: print(f"KF PUBLISH: X={out_x:.3f} mm, Y={out_y:.3f} mm")
                 last_published = (out_x, out_y)
                 bench.add_position(x_mm, y_mm)  # keep raw in stats
             else:
@@ -230,6 +230,7 @@ async def run(app: AppConfig):
 
                 if publish:
                     await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+                    if run_cfg.print_coords: print(f"{mode.upper()} PUBLISH: X={out_x:.3f} mm, Y={out_y:.3f} mm")
                     last_published = (out_x, out_y)
                     bench.add_position(x_mm, y_mm)  # count as kept only when we publish
                 else:
@@ -249,6 +250,7 @@ async def run(app: AppConfig):
                                 continue
 
                     await pub.publish_xy(out_x, out_y, angle_deg=0.0)
+                    if run_cfg.print_coords: print(f"FALLBACK RAW PUBLISH: X={out_x:.3f} mm, Y={out_y:.3f} mm")
                     last_published = (out_x, out_y)
 
             timer.mark("End")

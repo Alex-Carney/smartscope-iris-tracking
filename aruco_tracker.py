@@ -3,10 +3,26 @@ import numpy as np
 import cv2
 
 class ArucoTracker:
-    def __init__(self, dict_name: str = "DICT_4X4_50", aruco_id: int = 0, w_mm: float = 19.05, h_mm: float = 19.05):
+
+
+    CENTER_STAGE_X = 50
+    CENTER_STAGE_Y = 50
+
+    def __init__(
+        self,
+        dict_name: str = "DICT_4X4_50",
+        aruco_id: int = 0,
+        w_mm: float = 19.05,
+        h_mm: float = 19.05,
+        frame_size_px: Tuple[int, int] | None = None,  # (W,H)
+        isotropic_scale: bool = False,                 # use same mm/px for X and Y
+    ):
         self.aruco_id = aruco_id
-        self.w_mm = w_mm
-        self.h_mm = h_mm
+        self.w_mm = float(w_mm)
+        self.h_mm = float(h_mm)
+        self.frame_w_px, self.frame_h_px = (frame_size_px or (0, 0))
+        self.isotropic_scale = bool(isotropic_scale)
+
         dictionary = getattr(cv2.aruco, dict_name)
         self.dict = cv2.aruco.getPredefinedDictionary(dictionary)
         params = cv2.aruco.DetectorParameters()
@@ -20,7 +36,7 @@ class ArucoTracker:
             c = c_in
             xmin = float(np.min(c[0, :, 0])); xmax = float(np.max(c[0, :, 0]))
             ymin = float(np.min(c[0, :, 1])); ymax = float(np.max(c[0, :, 1]))
-            DESIRED_WIN = 5
+            DESIRED_WIN = 11
             pad = max(12, 2 * DESIRED_WIN + 6)
             x0 = int(max(0, np.floor(xmin) - pad))
             y0 = int(max(0, np.floor(ymin) - pad))
@@ -38,10 +54,10 @@ class ArucoTracker:
             legal_win = int(max(1, min(DESIRED_WIN, max_win_x, max_win_y)))
             if legal_win < 1:
                 return c_in
-            roi_blur = cv2.GaussianBlur(roi, (3, 3), 0.6)
+            roi_blur = cv2.GaussianBlur(roi, (9, 9), 0.6)
             refined = cv2.cornerSubPix(
                 roi_blur, c_loc, (legal_win, legal_win), (-1, -1),
-                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5000, 1e-6)
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5000, 1e-8)
             )
             refined[:, :, 0] += x0
             refined[:, :, 1] += y0
@@ -55,19 +71,23 @@ class ArucoTracker:
         self,
         gray: np.ndarray,
         undistort_points_fn=None
-    ) -> Optional[Tuple[Tuple[float, float], np.ndarray]]:
+    ) -> Optional[Tuple[Tuple[float, float], np.ndarray, Tuple[float, float]]]:
         """
-        Detect the ArUco marker, refine corners, and return:
-            ((x_mm, y_mm), corners_px)
-        where corners_px is shape (4,2) float32 in pixel coordinates.
+        Returns:
+            ((x_mm, y_mm), corners_px(4,2 float32), (fov_w_mm, fov_h_mm))
 
-        Returns None if no marker (or target ID) is found or geometry is degenerate.
+        Coordinates are in mm with **top-left pixel as (0,0)**, i.e.:
+            x_mm = x_px * mm_per_px_x
+            y_mm = y_px * mm_per_px_y
+
+        fov_w_mm = frame_width_px  * mm_per_px_x
+        fov_h_mm = frame_height_px * mm_per_px_y
         """
         corners, ids, _ = self.detector.detectMarkers(gray)
         if ids is None or len(corners) == 0:
             return None
 
-        # Find target ID if present, else use first marker
+        # Find target ID if requested, else use first detection
         if self.aruco_id is not None and ids is not None:
             matches = np.where(ids.flatten() == self.aruco_id)[0]
             if len(matches) == 0:
@@ -78,7 +98,7 @@ class ArucoTracker:
 
         c = corners[idx].astype(np.float32).reshape(1, 4, 2)
 
-        # Optional undistort to pixel coordinates
+        # Optional undistort to pixel coords
         if undistort_points_fn is not None:
             c = undistort_points_fn(c)
 
@@ -86,32 +106,31 @@ class ArucoTracker:
         c_ref = self._safe_refine_subpix(gray, c)
         corners_px = c_ref.reshape(4, 2).astype(np.float32)
 
-        # Convert center to mm using per-frame pixel scale
-        center_mm = self._px_to_mm_center(corners_px)
-        if center_mm is None:
-            return None
-
-        return center_mm, corners_px
-
-    def _px_to_mm_center(self, corners: np.ndarray) -> Optional[Tuple[float, float]]:
-        """
-        Affine (flat) model:
-        center_px = mean of 4 vertices (linear, KF-friendly)
-        scale: mm/px per axis from average of opposite edges (lower noise)
-        """
-        c = corners.reshape(4, 2).astype(np.float64)  # TL,TR,BR,BL (OpenCV)
-
-        # Linear center in pixels
-        ctr_px = c.mean(axis=0)           # == 0.5*(c0+c2) == 0.5*(c1+c3)
-        cx_px, cy_px = float(ctr_px[0]), float(ctr_px[1])
-
-        # Per-axis mm/px from opposite edges (still simple, just less noisy)
-        px_w = 0.5 * (np.linalg.norm(c[1] - c[0]) + np.linalg.norm(c[2] - c[3]))
-        px_h = 0.5 * (np.linalg.norm(c[2] - c[1]) + np.linalg.norm(c[3] - c[0]))
+        # Compute mm-per-pixel using the tag’s side lengths in pixels
+        px_w = float(np.linalg.norm(corners_px[1] - corners_px[0]))
+        px_h = float(np.linalg.norm(corners_px[2] - corners_px[1]))
         if px_w <= 0.0 or px_h <= 0.0:
             return None
-        sx = self.w_mm / px_w
-        sy = self.h_mm / px_h
 
-        return cx_px * sx, cy_px * sy
+        if self.isotropic_scale:
+            s = 0.5 * ((self.w_mm / px_w) + (self.h_mm / px_h))
+            mm_per_px_x = mm_per_px_y = s
+        else:
+            mm_per_px_x = self.w_mm / px_w
+            mm_per_px_y = self.h_mm / px_h
 
+        # Center in pixels -> mm with (0,0) at the image top-left
+        ctr_px = np.mean(corners_px, axis=0)
+        x_mm = float(ctr_px[0] * mm_per_px_x) - self.CENTER_STAGE_X
+        y_mm = float(ctr_px[1] * mm_per_px_y) - self.CENTER_STAGE_Y
+
+        # FOV in mm (bottom-right corner)
+        if self.frame_w_px > 0 and self.frame_h_px > 0:
+            fov_w_mm = float(self.frame_w_px * mm_per_px_x)
+            fov_h_mm = float(self.frame_h_px * mm_per_px_y)
+        else:
+            # if we weren't given frame size at init, infer from gray
+            fov_w_mm = float(gray.shape[1] * mm_per_px_x)
+            fov_h_mm = float(gray.shape[0] * mm_per_px_y)
+
+        return (x_mm, y_mm), corners_px, (fov_w_mm, fov_h_mm)
