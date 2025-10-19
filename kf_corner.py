@@ -5,9 +5,6 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-CENTER_STAGE_X = 50
-CENTER_STAGE_Y = 50
-
 
 def _I(n: int) -> np.ndarray:
     return np.eye(n, dtype=np.float64)
@@ -133,6 +130,6 @@ class CornerKalman:
 
     def get_center_mm(self) -> Tuple[float, float]:
         px = self.x[:self.np, 0]  # 8 positions
-        cx = float(np.mean(px[0::2]))  - CENTER_STAGE_X  # average x's
-        cy = float(np.mean(px[1::2]))  - CENTER_STAGE_Y  # average y's
+        cx = float(np.mean(px[0::2]))  # average x's
+        cy = float(np.mean(px[1::2]))  # average y's
         return cx, cy

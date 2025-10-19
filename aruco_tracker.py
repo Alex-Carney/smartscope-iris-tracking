@@ -3,9 +3,10 @@ from typing import Optional, Tuple, Any
 import numpy as np
 import cv2
 
+def _clip(v, lo, hi):
+    return max(lo, min(hi, v))
+
 class ArucoTracker:
-    CENTER_STAGE_X = 50
-    CENTER_STAGE_Y = 50
 
     def __init__(
         self,
@@ -13,43 +14,127 @@ class ArucoTracker:
         aruco_id: int = 0,
         w_mm: float = 19.05,
         h_mm: float = 19.05,
-        frame_size_px: Tuple[int, int] | None = None,  # (W,H)
-        isotropic_scale: bool = False,                 # use same mm/px for X and Y
-        time_accounting: Any | None = None,            # optional TimeAccounting
+        frame_size_px: Tuple[int, int] | None = None,
+        isotropic_scale: bool = False,
+        time_accounting: Any | None = None,
+
+        # ---- NEW speed knobs ----
+        roi_first: bool = True,             # try detection in last-known ROI first
+        roi_pad_px: int = 60,               # pad around last bbox (each side)
+        roi_fail_reset: int = 2,            # if ROI misses this many times, go full frame
+        full_downscale: float = 0.5,        # full-frame fallback scale (0.5 ~ 4x fewer px)
+        tune_params_fast: bool = True,      # tighten DetectorParameters
     ):
         self.aruco_id = aruco_id
         self.w_mm = float(w_mm)
         self.h_mm = float(h_mm)
         self.frame_w_px, self.frame_h_px = (frame_size_px or (0, 0))
         self.isotropic_scale = bool(isotropic_scale)
-        self.timer = time_accounting  # stored default timer (can override per call)
+        self.timer = time_accounting
 
+        # Detector + (optional) faster parameter tuning
         dictionary = getattr(cv2.aruco, dict_name)
         self.dict = cv2.aruco.getPredefinedDictionary(dictionary)
         params = cv2.aruco.DetectorParameters()
-        # We do manual refinement, so disable built-in corner refinement here
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
+
+        if tune_params_fast:
+            # Keep detector from sweeping too many scales/windows:
+            # (these rates are relative to min(image dim))
+            params.minMarkerPerimeterRate = 0.02    # ignore too-small contours
+            params.maxMarkerPerimeterRate = 0.50    # ignore huge “markers”
+            # Reduce the adaptive threshold workloads
+            params.adaptiveThreshWinSizeMin = 5
+            params.adaptiveThreshWinSizeMax = 23
+            params.adaptiveThreshWinSizeStep = 6
+            params.adaptiveThreshConstant = 7
+            # Avoid looking near the image border
+            params.minDistanceToBorder = 3
+            # For cleanliness
+            params.minCornerDistanceRate = 0.03
+            params.polygonalApproxAccuracyRate = 0.03
+
         self.detector = cv2.aruco.ArucoDetector(self.dict, params)
 
+        # ROI tracking state
+        self._have_roi = False
+        self._roi = (0, 0, 0, 0)   # x0,y0,x1,y1 inclusive
+        self._roi_miss = 0
+        self.roi_first = roi_first
+        self.roi_pad_px = int(roi_pad_px)
+        self.roi_fail_reset = int(roi_fail_reset)
+        self.full_downscale = float(full_downscale)
+
+    # ---- utility for timing marks ----
     @staticmethod
-    def _safe_refine_subpix(
-        gray: np.ndarray,
-        c_in: np.ndarray,
-        timer: Any | None = None,
-    ) -> np.ndarray:
-        """
-        Returns refined corners or falls back to c_in on any error.
-        Emits fine-grained timing marks if `timer` is provided.
-        """
+    def _mark(timer: Any | None, name: str) -> None:
+        if timer is not None:
+            timer.mark(name)
+
+    # ---- build/update ROI from corners ----
+    def _bbox_from_corners(self, c4x2: np.ndarray) -> Tuple[int, int, int, int]:
+        x0 = int(np.floor(np.min(c4x2[:, 0])))
+        y0 = int(np.floor(np.min(c4x2[:, 1])))
+        x1 = int(np.ceil (np.max(c4x2[:, 0])))
+        y1 = int(np.ceil (np.max(c4x2[:, 1])))
+        if self.roi_pad_px > 0:
+            x0 -= self.roi_pad_px; y0 -= self.roi_pad_px
+            x1 += self.roi_pad_px; y1 += self.roi_pad_px
+        W = self.frame_w_px if self.frame_w_px > 0 else None
+        H = self.frame_h_px if self.frame_h_px > 0 else None
+        if W is None or H is None:
+            # infer from last image we saw — safe clipping later
+            return x0, y0, x1, y1
+        x0 = _clip(x0, 0, W-1); y0 = _clip(y0, 0, H-1)
+        x1 = _clip(x1, 0, W-1); y1 = _clip(y1, 0, H-1)
+        return x0, y0, x1, y1
+
+    def _update_roi(self, c4x2: np.ndarray, frame_shape: Tuple[int, int]) -> None:
+        H, W = frame_shape[:2]
+        x0, y0, x1, y1 = self._bbox_from_corners(c4x2)
+        x0 = _clip(x0, 0, W-1); y0 = _clip(y0, 0, H-1)
+        x1 = _clip(x1, 0, W-1); y1 = _clip(y1, 0, H-1)
+        self._roi = (x0, y0, x1, y1)
+        self._have_roi = True
+        self._roi_miss = 0
+
+    # ---- ROI-first detect ----
+    def _detect_in_roi(self, gray: np.ndarray):
+        x0, y0, x1, y1 = self._roi
+        if x1 <= x0 or y1 <= y0:
+            return None
+        roi = gray[y0:y1+1, x0:x1+1]
+        corners, ids, _ = self.detector.detectMarkers(roi)
+        if corners is None or len(corners) == 0 or ids is None:
+            return None
+        # translate corners back to image coords
+        cc = [c.astype(np.float32) + np.array([[[x0, y0]]], dtype=np.float32) for c in corners]
+        return cc, ids
+
+    # ---- full-frame detect with optional downscale ----
+    def _detect_full(self, gray: np.ndarray):
+        if self.full_downscale < 1.0:
+            scale = self.full_downscale
+            small = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            corners, ids, _ = self.detector.detectMarkers(small)
+            if corners is None or len(corners) == 0 or ids is None:
+                return None
+            # scale corners back
+            s = 1.0 / scale
+            cc = [c.astype(np.float32) * s for c in corners]
+            return cc, ids
+        else:
+            return self.detector.detectMarkers(gray)
+
+    # ---- your existing safe subpix, now reused ----
+    @staticmethod
+    def _safe_refine_subpix(gray: np.ndarray, c_in: np.ndarray, timer: Any | None = None) -> np.ndarray:
         try:
+            ArucoTracker._mark(timer, "aruco:roi")
             c = c_in
-            # ----- ROI build -----
-            if timer is not None:
-                timer.mark("aruco:roi")
             xmin = float(np.min(c[0, :, 0])); xmax = float(np.max(c[0, :, 0]))
             ymin = float(np.min(c[0, :, 1])); ymax = float(np.max(c[0, :, 1]))
-
-            DESIRED_WIN = 11
+            DESIRED_WIN = 19
             pad = max(12, 2 * DESIRED_WIN + 6)
             x0 = int(max(0, np.floor(xmin) - pad))
             y0 = int(max(0, np.floor(ymin) - pad))
@@ -71,25 +156,18 @@ class ArucoTracker:
             if legal_win < 1:
                 return c_in
 
-            # ----- blur (helps subpix stability) -----
-            if timer is not None:
-                timer.mark("aruco:blur")
-            roi_blur = cv2.GaussianBlur(roi, (9, 9), 0.6)
+            ArucoTracker._mark(timer, "aruco:blur")
+            roi_blur = cv2.GaussianBlur(roi, (11, 11), 0.6)
 
-            # ----- subpixel refinement -----
-            if timer is not None:
-                timer.mark("aruco:cornerSubPix")
+            ArucoTracker._mark(timer, "aruco:cornerSubPix")
             refined = cv2.cornerSubPix(
                 roi_blur, c_loc,
                 (legal_win, legal_win), (-1, -1),
-                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5000, 1e-8)
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 7500, 1e-9)
             )
             refined[:, :, 0] += x0
             refined[:, :, 1] += y0
             return refined
-
-        except cv2.error:
-            return c_in
         except Exception:
             return c_in
 
@@ -99,49 +177,59 @@ class ArucoTracker:
         undistort_points_fn=None,
         timer: Any | None = None,
     ) -> Optional[Tuple[Tuple[float, float], np.ndarray, Tuple[float, float]]]:
-        """
-        Returns:
-            ((x_mm, y_mm), corners_px(4,2 float32), (fov_w_mm, fov_h_mm))
 
-        Coordinates are in mm with top-left pixel as (0,0).
-        """
         t = timer or self.timer
-        if t is not None:
-            t.mark("aruco:start")
+        self._mark(t, "aruco:start")
 
-        # ----- detect -----
-        corners, ids, _ = self.detector.detectMarkers(gray)
-        if t is not None:
-            t.mark("aruco:detectMarkers")
+        H, W = gray.shape[:2]
+
+        # ---- 1) ROI-first (if we have one) ----
+        corners = ids = None
+        if self.roi_first and self._have_roi and self._roi_miss < self.roi_fail_reset:
+            self._mark(t, "aruco:detectROI")
+            roi_ret = self._detect_in_roi(gray)
+            if roi_ret is not None:
+                corners, ids = roi_ret
+            else:
+                self._roi_miss += 1
+
+        # ---- 2) full-frame fallback (optional downscale) ----
+        if corners is None:
+            self._mark(t, "aruco:detectFull")
+            full_ret = self._detect_full(gray)
+            if full_ret is None:
+                return None
+            corners, ids = full_ret
+            self._roi_miss = 0  # reset since full-frame succeeded
+
+        # ---- pick marker (target id or first) ----
         if ids is None or len(corners) == 0:
             return None
-
-        # ----- select target id -----
-        if self.aruco_id is not None and ids is not None:
-            matches = np.where(ids.flatten() == self.aruco_id)[0]
-            if len(matches) == 0:
+        if self.aruco_id is not None:
+            # Only one marker expected, check if it matches our target ID
+            if ids[0][0] != self.aruco_id:
                 return None
-            idx = int(matches[0])
+            k = 0
         else:
-            idx = 0
-        if t is not None:
-            t.mark("aruco:select_id")
+            k = 0
+        self._mark(t, "aruco:select_id")
 
-        c = corners[idx].astype(np.float32).reshape(1, 4, 2)
+        c = corners[k].astype(np.float32).reshape(1, 4, 2)
 
-        # ----- optional undistort of corners -----
+        # Optional undistort
         if undistort_points_fn is not None:
             c = undistort_points_fn(c)
-        if t is not None:
-            t.mark("aruco:undistort")
+        self._mark(t, "aruco:undistort")
 
-        # ----- subpixel refinement (instrumented internally) -----
+        # Subpixel refinement
         c_ref = self._safe_refine_subpix(gray, c, timer=t)
         corners_px = c_ref.reshape(4, 2).astype(np.float32)
 
-        # ----- mm conversion -----
-        if t is not None:
-            t.mark("aruco:mm")
+        # Update ROI for next frame
+        self._update_roi(corners_px, (H, W))
+
+        # mm conversion
+        self._mark(t, "aruco:mm")
         px_w = float(np.linalg.norm(corners_px[1] - corners_px[0]))
         px_h = float(np.linalg.norm(corners_px[2] - corners_px[1]))
         if px_w <= 0.0 or px_h <= 0.0:
@@ -155,15 +243,14 @@ class ArucoTracker:
             mm_per_px_y = self.h_mm / px_h
 
         ctr_px = np.mean(corners_px, axis=0)
-        x_mm = float(ctr_px[0] * mm_per_px_x) - self.CENTER_STAGE_X
-        y_mm = float(ctr_px[1] * mm_per_px_y) - self.CENTER_STAGE_Y
+        x_mm = float(ctr_px[0] * mm_per_px_x) 
+        y_mm = float(ctr_px[1] * mm_per_px_y) 
 
-        # FOV in mm
         if self.frame_w_px > 0 and self.frame_h_px > 0:
             fov_w_mm = float(self.frame_w_px * mm_per_px_x)
             fov_h_mm = float(self.frame_h_px * mm_per_px_y)
         else:
-            fov_w_mm = float(gray.shape[1] * mm_per_px_x)
-            fov_h_mm = float(gray.shape[0] * mm_per_px_y)
+            fov_w_mm = float(W * mm_per_px_x)
+            fov_h_mm = float(H * mm_per_px_y)
 
         return (x_mm, y_mm), corners_px, (fov_w_mm, fov_h_mm)

@@ -4,15 +4,16 @@ import numpy as np
 
 @dataclass
 class CameraConfig:
-    device_name: str = "Global Shutter Camera"
-    width: int = 1600
-    height: int = 1200
-    fps: int = 90
+    # device_name: str = "Global Shutter Camera"
+    device_name: str = "4K AF Camera"
+    width: int = 3840
+    height: int = 2160
+    fps: int = 30
     # ffmpeg uses dshow on Windows; adjust if you change platforms
 
 @dataclass
 class ArucoConfig:
-    aruco_id: int = 0
+    aruco_id: int = 0 
     aruco_w_mm: float = 19.05  # 0.75 inches
     aruco_h_mm: float = 19.05
     dictionary: str = "DICT_4X4_50"  # OpenCV predefined dictionary name
@@ -47,11 +48,11 @@ class NATSConfig:
 
 @dataclass
 class NoiseGateConfig:
-    enable: bool = False
+    enable: bool = True
     use_radial: bool = False
-    floor_mm: float = 0.05
-    floor_x_mm: float = 0.05
-    floor_y_mm: float = 0.05
+    floor_mm: float = 50.0
+    floor_x_mm: float = 50.0
+    floor_y_mm: float = 50.0
 
 @dataclass
 class RunConfig:
