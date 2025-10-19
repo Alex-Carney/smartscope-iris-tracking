@@ -1,7 +1,21 @@
 # ASCII only
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, Dict
 import numpy as np
 import cv2
+
+MarkerMeasurement = Tuple[
+    Tuple[float, float],  # center_mm (x, y)
+    np.ndarray,           # corners_px (4,2)
+    Tuple[float, float],  # fov_mm (w, h)
+    Tuple[float, float],  # mm_per_px (x, y)
+]
+
+# Map valid marker IDs to their semantic role (dynamic vs static).
+# IDs not listed here are ignored to suppress spurious detections.
+TRACKED_MARKERS: Dict[int, str] = {
+    0: "dynamic",
+    2: "static",
+}
 
 def _clip(v, lo, hi):
     return max(lo, min(hi, v))
@@ -171,6 +185,37 @@ class ArucoTracker:
         except Exception:
             return c_in
 
+    def _corners_to_mm(
+        self,
+        corners_px: np.ndarray,
+        frame_shape: Tuple[int, int],
+    ) -> Optional[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]]:
+        px_w = float(np.linalg.norm(corners_px[1] - corners_px[0]))
+        px_h = float(np.linalg.norm(corners_px[2] - corners_px[1]))
+        if px_w <= 0.0 or px_h <= 0.0:
+            return None
+
+        if self.isotropic_scale:
+            s = 0.5 * ((self.w_mm / px_w) + (self.h_mm / px_h))
+            mm_per_px_x = mm_per_px_y = s
+        else:
+            mm_per_px_x = self.w_mm / px_w
+            mm_per_px_y = self.h_mm / px_h
+
+        ctr_px = np.mean(corners_px, axis=0)
+        x_mm = float(ctr_px[0] * mm_per_px_x)
+        y_mm = float(ctr_px[1] * mm_per_px_y)
+
+        H, W = frame_shape
+        if self.frame_w_px > 0 and self.frame_h_px > 0:
+            fov_w_mm = float(self.frame_w_px * mm_per_px_x)
+            fov_h_mm = float(self.frame_h_px * mm_per_px_y)
+        else:
+            fov_w_mm = float(W * mm_per_px_x)
+            fov_h_mm = float(H * mm_per_px_y)
+
+        return (x_mm, y_mm), (fov_w_mm, fov_h_mm), (mm_per_px_x, mm_per_px_y)
+
     def detect_mm(
         self,
         gray: np.ndarray,
@@ -205,16 +250,27 @@ class ArucoTracker:
         # ---- pick marker (target id or first) ----
         if ids is None or len(corners) == 0:
             return None
+
+        allowed = []
+        for idx, marker_id_arr in enumerate(ids):
+            marker_id = int(marker_id_arr[0])
+            if marker_id not in TRACKED_MARKERS:
+                continue
+            allowed.append((idx, marker_id))
+
+        if not allowed:
+            return None
+
         if self.aruco_id is not None:
-            # Only one marker expected, check if it matches our target ID
-            if ids[0][0] != self.aruco_id:
+            target_idx = next((idx for idx, mid in allowed if mid == self.aruco_id), None)
+            if target_idx is None:
                 return None
-            k = 0
         else:
-            k = 0
+            target_idx = allowed[0][0]
+
         self._mark(t, "aruco:select_id")
 
-        c = corners[k].astype(np.float32).reshape(1, 4, 2)
+        c = corners[target_idx].astype(np.float32).reshape(1, 4, 2)
 
         # Optional undistort
         if undistort_points_fn is not None:
@@ -230,27 +286,59 @@ class ArucoTracker:
 
         # mm conversion
         self._mark(t, "aruco:mm")
-        px_w = float(np.linalg.norm(corners_px[1] - corners_px[0]))
-        px_h = float(np.linalg.norm(corners_px[2] - corners_px[1]))
-        if px_w <= 0.0 or px_h <= 0.0:
+        mm_info = self._corners_to_mm(corners_px, (H, W))
+        if mm_info is None:
             return None
+        center_mm, fov_mm, _scale = mm_info
+        return center_mm, corners_px, fov_mm
 
-        if self.isotropic_scale:
-            s = 0.5 * ((self.w_mm / px_w) + (self.h_mm / px_h))
-            mm_per_px_x = mm_per_px_y = s
-        else:
-            mm_per_px_x = self.w_mm / px_w
-            mm_per_px_y = self.h_mm / px_h
+    def detect_multiple_mm(
+        self,
+        gray: np.ndarray,
+        undistort_points_fn=None,
+        timer: Any | None = None,
+    ) -> Dict[int, MarkerMeasurement]:
+        """
+        Detect all visible markers in `gray` and return per-ID millimeter data.
+        """
+        t = timer or self.timer
+        self._mark(t, "aruco_multi:start")
 
-        ctr_px = np.mean(corners_px, axis=0)
-        x_mm = float(ctr_px[0] * mm_per_px_x) 
-        y_mm = float(ctr_px[1] * mm_per_px_y) 
+        # Full-frame detection (multi-marker path does not reuse ROI heuristics yet)
+        self._mark(t, "aruco_multi:detectFull")
+        full_ret = self._detect_full(gray)
+        if full_ret is None:
+            return {}
+        corners_list, ids = full_ret
 
-        if self.frame_w_px > 0 and self.frame_h_px > 0:
-            fov_w_mm = float(self.frame_w_px * mm_per_px_x)
-            fov_h_mm = float(self.frame_h_px * mm_per_px_y)
-        else:
-            fov_w_mm = float(W * mm_per_px_x)
-            fov_h_mm = float(H * mm_per_px_y)
+        detections: Dict[int, MarkerMeasurement] = {}
+        H, W = gray.shape[:2]
 
-        return (x_mm, y_mm), corners_px, (fov_w_mm, fov_h_mm)
+        for raw_corners, marker_id_arr in zip(corners_list, ids):
+            marker_id = int(marker_id_arr[0])
+            if marker_id not in TRACKED_MARKERS:
+                continue
+            c = raw_corners.astype(np.float32).reshape(1, 4, 2)
+
+            self._mark(t, "aruco_multi:prep")
+            if undistort_points_fn is not None:
+                c = undistort_points_fn(c)
+                self._mark(t, "aruco_multi:undistort")
+
+            refined = self._safe_refine_subpix(gray, c, timer=t)
+            self._mark(t, "aruco_multi:refine")
+            corners_px = refined.reshape(4, 2).astype(np.float32)
+
+            mm_info = self._corners_to_mm(corners_px, (H, W))
+            self._mark(t, "aruco_multi:mm")
+            if mm_info is None:
+                continue
+            center_mm, fov_mm, mm_per_px = mm_info
+
+            detections[marker_id] = (center_mm, corners_px, fov_mm, mm_per_px)
+
+            if marker_id == self.aruco_id:
+                self._update_roi(corners_px, (H, W))
+
+        self._mark(t, "aruco_multi:end")
+        return detections
